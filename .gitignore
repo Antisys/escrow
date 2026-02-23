@@ -4,3 +4,4 @@
 .tmpenv
 .direnv
 .vscode
+__pycache__/
