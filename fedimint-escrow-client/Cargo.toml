@@ -16,6 +16,8 @@ anyhow = { workspace = true }
 fedimint-escrow-common ={ path = "../fedimint-escrow-common" }
 fedimint-escrow-server = { path = "../fedimint-escrow-server" }
 fedimint-client = { workspace = true }
+fedimint-client-module = { workspace = true }
+fedimint-api-client = { workspace = true }
 fedimint-core ={ workspace = true }
 futures = { workspace = true }
 erased-serde = { workspace = true }
@@ -32,7 +34,7 @@ serde_json = "1.0.120"
 rust_decimal = "1.35"
 random-string = "1.1.0"
 async-stream = "0.3.5"
-clap = "4.5.8"
+clap = { version = "4.5.8", features = ["derive"] }
 
 [build-dependencies]
 fedimint-build = { git = "https://github.com/fedimint/fedimint" }

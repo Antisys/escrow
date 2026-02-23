@@ -29,6 +29,7 @@ strum = { workspace = true }
 strum_macros = { workspace = true }
 thiserror = { workspace = true }
 fedimint-server = { workspace = true }
+fedimint-server-core = { workspace = true }
 tracing = { workspace = true }
 tokio = { version = "1.26.0", features = ["sync"] }
 sha2 = "0.10.8"

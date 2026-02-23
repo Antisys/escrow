@@ -214,7 +214,9 @@ impl std::fmt::Display for EscrowOutputOutcome {
 }
 
 // Wire together the types for this module
+// Note: KIND is now required as the first argument (changed in v0.4+)
 plugin_types_trait_impl_common!(
+    KIND,
     EscrowModuleTypes,
     EscrowClientConfig,
     EscrowInput,

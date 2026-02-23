@@ -50,7 +50,7 @@ pub(crate) async fn handle_cli_command(
     args: &[ffi::OsString],
 ) -> anyhow::Result<serde_json::Value> {
     let command =
-        Command::parse_from(iter::once(&ffi::OsString::from("escrow")).chain(args.iter()));
+        Command::parse_from(iter::once(ffi::OsString::from("escrow")).chain(args.iter().cloned()));
 
     let res = match command {
         Command::Create {

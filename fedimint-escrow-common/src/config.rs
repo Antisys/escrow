@@ -36,9 +36,9 @@ impl Default for EscrowGenParams {
 }
 
 /// Contains all the configuration for the server
+/// Note: v0.4+ TypedServerModuleConfig macro only supports private+consensus fields
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EscrowConfig {
-    pub local: EscrowConfigLocal,
     pub private: EscrowConfigPrivate,
     pub consensus: EscrowConfigConsensus,
 }
@@ -82,13 +82,10 @@ pub struct EscrowConfigConsensus {
 pub struct EscrowConfigPrivate;
 
 // Wire together the configs for this module
+// Note: v0.4+ macro takes 5 args (GenParams no longer passed to macro)
 plugin_types_trait_impl_config!(
     EscrowCommonInit,
-    EscrowGenParams,
-    EscrowGenParamsLocal,
-    EscrowGenParamsConsensus,
     EscrowConfig,
-    EscrowConfigLocal,
     EscrowConfigPrivate,
     EscrowConfigConsensus,
     EscrowClientConfig

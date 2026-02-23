@@ -6,19 +6,23 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use async_stream::stream;
-use async_trait::async_trait;
-use fedimint_client::module::init::{ClientModuleInit, ClientModuleInitArgs};
-use fedimint_client::module::recovery::NoModuleBackup;
-use fedimint_client::module::{ClientContext, ClientModule};
-use fedimint_client::oplog::UpdateStreamOrOutcome;
-use fedimint_client::transaction::{ClientInput, ClientOutput, TransactionBuilder};
-use fedimint_core::api::DynModuleApi;
-use fedimint_core::core::{KeyPair, OperationId};
-use fedimint_core::db::{Database, DatabaseTransaction, DatabaseVersion};
-use fedimint_core::module::{
-    ApiVersion, ModuleCommon, ModuleInit, MultiApiVersion, TransactionItemAmount,
+use fedimint_client_module::module::init::{ClientModuleInit, ClientModuleInitArgs};
+use fedimint_client_module::module::recovery::NoModuleBackup;
+use fedimint_client_module::module::{ClientContext, ClientModule};
+use fedimint_client_module::oplog::UpdateStreamOrOutcome;
+use fedimint_client_module::transaction::{
+    ClientInput, ClientInputBundle, ClientInputSM, ClientOutput, ClientOutputBundle, ClientOutputSM,
+    TransactionBuilder,
 };
-use fedimint_core::{apply, async_trait_maybe_send, Amount, OutPoint, TransactionId};
+use fedimint_core::OutPointRange;
+use fedimint_api_client::api::DynModuleApi;
+use fedimint_core::core::OperationId;
+use fedimint_core::db::{Database, DatabaseTransaction};
+use fedimint_core::module::{
+    ApiVersion, Amounts, ModuleCommon, ModuleInit, MultiApiVersion,
+};
+use fedimint_core::secp256k1::{Keypair, Message, Secp256k1};
+use fedimint_core::{apply, async_trait_maybe_send, Amount, OutPoint};
 use fedimint_escrow_common::config::EscrowClientConfig;
 use fedimint_escrow_common::endpoints::EscrowInfo;
 use fedimint_escrow_common::{
@@ -30,7 +34,6 @@ use futures::StreamExt;
 use rand::{thread_rng, Rng};
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
-use secp256k1::{Message, PublicKey, Secp256k1};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -41,7 +44,7 @@ use crate::states::{EscrowClientContext, EscrowStateMachine};
 #[derive(Debug)]
 pub struct EscrowClientModule {
     cfg: EscrowClientConfig,
-    key: KeyPair,
+    key: Keypair,
     client_ctx: ClientContext<Self>,
     module_api: DynModuleApi,
     db: Database,
@@ -72,42 +75,22 @@ impl ClientModule for EscrowClientModule {
         }
     }
 
-    /// conveys the monetary value of escrow input
-    fn input_amount(
+    /// Returns the fee the processing of this input requires (not the amount).
+    fn input_fee(
         &self,
-        input: &<Self::Common as ModuleCommon>::Input,
-    ) -> Option<TransactionItemAmount> {
-        match input {
-            EscrowInput::ClamingWithoutDispute(input) => Some(TransactionItemAmount {
-                amount: input.amount,
-                fee: Amount::ZERO,
-            }),
-            EscrowInput::ClaimingAfterDispute(input) => Some(TransactionItemAmount {
-                amount: input.amount,
-                fee: Amount::ZERO,
-            }),
-            EscrowInput::ArbiterDecision(input) => Some(TransactionItemAmount {
-                amount: input.amount,
-                fee: Amount::ZERO,
-            }),
-            EscrowInput::Disputing(_) => Some(TransactionItemAmount {
-                amount: Amount::ZERO,
-                fee: Amount::ZERO,
-            }),
-        }
+        _amount: &Amounts,
+        _input: &<Self::Common as ModuleCommon>::Input,
+    ) -> Option<Amounts> {
+        Some(Amounts::ZERO)
     }
 
-    /// conveys to the transaction the monetary value of escrow output so as to
-    /// burn the equivalent ecash
-    fn output_amount(
+    /// Returns the fee the processing of this output requires.
+    fn output_fee(
         &self,
-        output: &<Self::Common as ModuleCommon>::Output,
-    ) -> Option<TransactionItemAmount> {
-        Some(TransactionItemAmount {
-            amount: output.amount,
-            fee: self.cfg.deposit_fee, /* deposit fee is required to use the escrow service to
-                                        * avoid scams */
-        })
+        _amount: &Amounts,
+        _output: &<Self::Common as ModuleCommon>::Output,
+    ) -> Option<Amounts> {
+        Some(Amounts::new_bitcoin(self.cfg.deposit_fee))
     }
 
     #[cfg(feature = "cli")]
@@ -124,8 +107,8 @@ impl EscrowClientModule {
     pub async fn create_escrow(
         &self,
         amount: Amount,
-        seller_pubkey: PublicKey,
-        arbiter_pubkey: PublicKey,
+        seller_pubkey: fedimint_core::secp256k1::PublicKey,
+        arbiter_pubkey: fedimint_core::secp256k1::PublicKey,
         escrow_id: String,
         secret_code_hash: String,
         max_arbiter_fee_bps: u16,
@@ -157,10 +140,13 @@ impl EscrowClientModule {
             max_arbiter_fee,
         };
 
-        let operation_id_clone = operation_id.clone();
+        let operation_id_clone = operation_id;
         let client_output = ClientOutput {
             output,
-            state_machines: Arc::new(move |_: TransactionId, _: u64| {
+            amounts: Amounts::new_bitcoin(amount),
+        };
+        let output_sm = ClientOutputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
                 vec![EscrowStateMachine {
                     operation_id: operation_id_clone,
                 }]
@@ -168,19 +154,18 @@ impl EscrowClientModule {
         };
 
         // Build and send tx to the fed by underfunding the transaction
-        // The transaction builder will select the necessary e-cash notes with mint
-        // output to cover the output amount and create the corresponding inputs itself
-        let tx = TransactionBuilder::new()
-            .with_output(self.client_ctx.make_client_output(client_output));
-        let outpoint = |txid, _| OutPoint { txid, out_idx: 0 };
-        let (txid, _change) = self
+        let tx = TransactionBuilder::new().with_outputs(
+            self.client_ctx
+                .make_client_outputs(ClientOutputBundle::new(vec![client_output], vec![output_sm])),
+        );
+        let out_point_range = self
             .client_ctx
-            .finalize_and_submit_transaction(operation_id, KIND.as_str(), outpoint, tx)
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
             .await?;
 
         // Subscribe to transaction updates
         let mut updates = self
-            .subscribe_transactions_input(operation_id, txid)
+            .subscribe_transactions_input(operation_id, out_point_range)
             .await
             .unwrap()
             .into_stream();
@@ -227,46 +212,45 @@ impl EscrowClientModule {
         hasher.update(secret_code.as_bytes());
         let hashed_message: [u8; 32] = hasher.finalize().into();
         // Create the message from the hash
-        let message = Message::from_slice(&hashed_message).expect("32 bytes");
+        let message = Message::from_digest_slice(&hashed_message).expect("32 bytes");
         // Sign the message using Schnorr signature
         let signature = secp.sign_schnorr(&message, &self.key);
 
         let operation_id = OperationId(thread_rng().gen());
-        // Transfer ecash to seller by overfunding the transaction
-        // Create input using the buyer account
         let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
             amount,
             escrow_id,
-            secret_code: secret_code,
-            hashed_message: hashed_message,
-            signature: signature,
+            secret_code,
+            hashed_message,
+            signature,
         });
 
-        let operation_id_clone = operation_id.clone();
+        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
-            keys: vec![self.key.clone()],
-            state_machines: Arc::new(move |_: TransactionId, _: u64| {
+            keys: vec![self.key],
+            amounts: Amounts::new_bitcoin(amount),
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
                 vec![EscrowStateMachine {
                     operation_id: operation_id_clone,
                 }]
             }),
         };
 
-        // Build and send tx to the fed
-        // The transaction builder will create mint output to cover the input amount by
-        // itself
-        let tx =
-            TransactionBuilder::new().with_input(self.client_ctx.make_client_input(client_input));
-        let outpoint = |txid, _| OutPoint { txid, out_idx: 0 };
-        let (txid, change) = self
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
             .client_ctx
-            .finalize_and_submit_transaction(operation_id, KIND.as_str(), outpoint, tx)
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
             .await?;
 
         // Subscribe to transaction updates
         let mut updates = self
-            .subscribe_transactions_output(operation_id, txid, change.clone())
+            .subscribe_transactions_output(operation_id, out_point_range)
             .await
             .unwrap()
             .into_stream();
@@ -308,7 +292,7 @@ impl EscrowClientModule {
         hasher.update("buyer_claim".as_bytes());
         let hashed_message: [u8; 32] = hasher.finalize().into();
         // Create the message from the hash
-        let message = Message::from_slice(&hashed_message).expect("32 bytes");
+        let message = Message::from_digest_slice(&hashed_message).expect("32 bytes");
         // Sign the message using Schnorr signature
         let signature = secp.sign_schnorr(&message, &self.key);
 
@@ -317,35 +301,36 @@ impl EscrowClientModule {
         let input = EscrowInput::ClaimingAfterDispute(EscrowInputClaimingAfterDispute {
             amount,
             escrow_id,
-            hashed_message: hashed_message,
-            signature: signature,
+            hashed_message,
+            signature,
         });
 
-        let operation_id_clone = operation_id.clone();
+        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
-            keys: vec![self.key.clone()],
-            state_machines: Arc::new(move |_: TransactionId, _: u64| {
+            keys: vec![self.key],
+            amounts: Amounts::new_bitcoin(amount),
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
                 vec![EscrowStateMachine {
                     operation_id: operation_id_clone,
                 }]
             }),
         };
 
-        // Build and send tx to the fed
-        // The transaction builder will create mint output to cover the input amount by
-        // itself
-        let tx =
-            TransactionBuilder::new().with_input(self.client_ctx.make_client_input(client_input));
-        let outpoint = |txid, _| OutPoint { txid, out_idx: 0 };
-        let (txid, change) = self
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
             .client_ctx
-            .finalize_and_submit_transaction(operation_id, KIND.as_str(), outpoint, tx)
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
             .await?;
 
         // Subscribe to transaction updates
         let mut updates = self
-            .subscribe_transactions_output(operation_id, txid, change.clone())
+            .subscribe_transactions_output(operation_id, out_point_range)
             .await
             .unwrap()
             .into_stream();
@@ -387,43 +372,44 @@ impl EscrowClientModule {
         hasher.update("seller_claim".as_bytes());
         let hashed_message: [u8; 32] = hasher.finalize().into();
         // Create the message from the hash
-        let message = Message::from_slice(&hashed_message).expect("32 bytes");
+        let message = Message::from_digest_slice(&hashed_message).expect("32 bytes");
         // Sign the message using Schnorr signature
         let signature = secp.sign_schnorr(&message, &self.key);
 
-        // Transfer ecash back to buyer by underfunding the transaction
+        // Transfer ecash back to seller by underfunding the transaction
         let input = EscrowInput::ClaimingAfterDispute(EscrowInputClaimingAfterDispute {
             amount,
             escrow_id,
-            hashed_message: hashed_message,
-            signature: signature,
+            hashed_message,
+            signature,
         });
 
-        let operation_id_clone = operation_id.clone();
+        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
-            keys: vec![self.key.clone()],
-            state_machines: Arc::new(move |_: TransactionId, _: u64| {
+            keys: vec![self.key],
+            amounts: Amounts::new_bitcoin(amount),
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
                 vec![EscrowStateMachine {
                     operation_id: operation_id_clone,
                 }]
             }),
         };
 
-        // Build and send tx to the fed
-        // The transaction builder will create mint output to cover the input amount by
-        // itself
-        let tx =
-            TransactionBuilder::new().with_input(self.client_ctx.make_client_input(client_input));
-        let outpoint = |txid, _| OutPoint { txid, out_idx: 0 };
-        let (txid, change) = self
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
             .client_ctx
-            .finalize_and_submit_transaction(operation_id, KIND.as_str(), outpoint, tx)
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
             .await?;
 
         // Subscribe to transaction updates
         let mut updates = self
-            .subscribe_transactions_output(operation_id, txid, change.clone())
+            .subscribe_transactions_output(operation_id, out_point_range)
             .await
             .unwrap()
             .into_stream();
@@ -451,41 +437,43 @@ impl EscrowClientModule {
         hasher.update("dispute".as_bytes());
         let hashed_message: [u8; 32] = hasher.finalize().into();
         // Create the message from the hash
-        let message = Message::from_slice(&hashed_message).expect("32 bytes");
+        let message = Message::from_digest_slice(&hashed_message).expect("32 bytes");
         // Sign the message using Schnorr signature using disputers keypair
         let signature = secp.sign_schnorr(&message, &self.key);
 
         let input = EscrowInput::Disputing(EscrowInputDisputing {
-            escrow_id: escrow_id,
+            escrow_id,
             disputer: self.key.public_key(),
-            hashed_message: hashed_message,
-            signature: signature,
+            hashed_message,
+            signature,
         });
 
-        let operation_id_clone = operation_id.clone();
+        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
-            keys: vec![self.key.clone()],
-            state_machines: Arc::new(move |_: TransactionId, _: u64| {
+            keys: vec![self.key],
+            amounts: Amounts::ZERO,
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
                 vec![EscrowStateMachine {
                     operation_id: operation_id_clone,
                 }]
             }),
         };
 
-        // Build and send tx to the fed
-        // The transaction builder will create mint output to cover the input amount by
-        // itself
-        let tx =
-            TransactionBuilder::new().with_input(self.client_ctx.make_client_input(client_input));
-        let outpoint = |txid, _| OutPoint { txid, out_idx: 0 };
-        let (txid, change) = self
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
             .client_ctx
-            .finalize_and_submit_transaction(operation_id, KIND.as_str(), outpoint, tx)
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
             .await?;
+
         // Subscribe to transaction updates
         let mut updates = self
-            .subscribe_transactions_output(operation_id, txid, change.clone())
+            .subscribe_transactions_output(operation_id, out_point_range)
             .await
             .unwrap()
             .into_stream();
@@ -535,44 +523,44 @@ impl EscrowClientModule {
         hasher.update(decision.as_bytes());
         let hashed_message: [u8; 32] = hasher.finalize().into();
         // Create the message from the hash
-        let message = Message::from_slice(&hashed_message).expect("32 bytes");
+        let message = Message::from_digest_slice(&hashed_message).expect("32 bytes");
         // Sign the message using Schnorr signature
         let signature = secp.sign_schnorr(&message, &self.key);
 
-        // Transfer ecash back to buyer by underfunding the transaction
         let input = EscrowInput::ArbiterDecision(EscrowInputArbiterDecision {
             amount: arbiter_fee,
-            escrow_id: escrow_id,
+            escrow_id,
             arbiter_decision,
-            hashed_message: hashed_message,
-            signature: signature,
+            hashed_message,
+            signature,
         });
 
-        let operation_id_clone = operation_id.clone();
+        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
-            keys: vec![self.key.clone()],
-            state_machines: Arc::new(move |_: TransactionId, _: u64| {
+            keys: vec![self.key],
+            amounts: Amounts::new_bitcoin(arbiter_fee),
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
                 vec![EscrowStateMachine {
                     operation_id: operation_id_clone,
                 }]
             }),
         };
 
-        // Build and send tx to the fed
-        // The transaction builder will create mint output to cover the input amount by
-        // itself
-        let tx =
-            TransactionBuilder::new().with_input(self.client_ctx.make_client_input(client_input));
-        let outpoint = |txid, _| OutPoint { txid, out_idx: 0 };
-        let (txid, change) = self
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
             .client_ctx
-            .finalize_and_submit_transaction(operation_id, KIND.as_str(), outpoint, tx)
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
             .await?;
 
         // Subscribe to transaction updates
         let mut updates = self
-            .subscribe_transactions_output(operation_id, txid, change.clone())
+            .subscribe_transactions_output(operation_id, out_point_range)
             .await
             .unwrap()
             .into_stream();
@@ -591,13 +579,14 @@ impl EscrowClientModule {
     }
 
     /// Subscribes to the transaction updates and yields the state of operation,
-    /// when the transaction has input attached not output!
+    /// when the transaction has no ecash output to claim.
     pub async fn subscribe_transactions_input(
         &self,
         operation_id: OperationId,
-        txid: TransactionId,
+        out_point_range: OutPointRange,
     ) -> anyhow::Result<UpdateStreamOrOutcome<EscrowOperationState>> {
         let tx_subscription = self.client_ctx.transaction_updates(operation_id).await;
+        let txid = out_point_range.txid();
 
         Ok(UpdateStreamOrOutcome::UpdateStream(Box::pin(stream! {
             yield EscrowOperationState::Created;
@@ -615,15 +604,16 @@ impl EscrowClientModule {
     }
 
     /// Subscribes to the transaction updates and yields the state of operation
-    /// when the transaction has output attached not input!
+    /// when the transaction generates ecash change outputs.
     pub async fn subscribe_transactions_output(
         &self,
         operation_id: OperationId,
-        txid: TransactionId,
-        change: Vec<OutPoint>,
+        out_point_range: OutPointRange,
     ) -> anyhow::Result<UpdateStreamOrOutcome<EscrowOperationState>> {
         let tx_subscription = self.client_ctx.transaction_updates(operation_id).await;
         let client_ctx = self.client_ctx.clone();
+        let txid = out_point_range.txid();
+        let change: Vec<OutPoint> = out_point_range.into_iter().collect();
 
         Ok(UpdateStreamOrOutcome::UpdateStream(Box::pin(stream! {
             yield EscrowOperationState::Created;
@@ -652,10 +642,8 @@ impl EscrowClientModule {
 #[derive(Debug, Clone)]
 pub struct EscrowClientInit;
 
-#[async_trait]
 impl ModuleInit for EscrowClientInit {
     type Common = EscrowCommonInit;
-    const DATABASE_VERSION: DatabaseVersion = DatabaseVersion(0);
 
     async fn dump_database(
         &self,

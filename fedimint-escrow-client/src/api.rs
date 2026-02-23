@@ -1,4 +1,4 @@
-use fedimint_core::api::{FederationApiExt, IModuleFederationApi};
+use fedimint_api_client::api::{FederationApiExt, IModuleFederationApi};
 use fedimint_core::module::ApiRequestErased;
 use fedimint_core::task::{MaybeSend, MaybeSync};
 use fedimint_core::{apply, async_trait_maybe_send};

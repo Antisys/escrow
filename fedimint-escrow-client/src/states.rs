@@ -1,6 +1,6 @@
-use fedimint_client::sm::{Context, DynState, State, StateTransition};
-use fedimint_client::DynGlobalClientContext;
-use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, OperationId};
+use fedimint_client_module::sm::{Context, DynState, State, StateTransition};
+use fedimint_client_module::DynGlobalClientContext;
+use fedimint_core::core::{Decoder, IntoDynInstance, ModuleInstanceId, ModuleKind, OperationId};
 use fedimint_core::encoding::{Decodable, Encodable};
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable)]
@@ -15,7 +15,9 @@ pub struct EscrowClientContext {
 }
 
 // escrow module doesn't need local context
-impl Context for EscrowClientContext {}
+impl Context for EscrowClientContext {
+    const KIND: Option<ModuleKind> = None;
+}
 
 impl State for EscrowStateMachine {
     type ModuleContext = EscrowClientContext;
