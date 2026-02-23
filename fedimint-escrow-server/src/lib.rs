@@ -1,11 +1,14 @@
 mod db;
 
+#[cfg(test)]
+mod tests;
+
 use std::collections::BTreeMap;
 
 use anyhow::bail;
 use async_trait::async_trait;
 pub use db::EscrowValue;
-use db::{DbKeyPrefix, EscrowKey, EscrowKeyPrefix};
+use db::{BlockHeightKey, DbKeyPrefix, EscrowKey, EscrowKeyPrefix};
 use fedimint_core::config::{
     ServerModuleConfig, ServerModuleConsensusConfig, TypedServerModuleConfig,
     TypedServerModuleConsensusConfig,
@@ -28,7 +31,7 @@ use fedimint_escrow_common::endpoints::{EscrowInfo, GET_MODULE_INFO};
 use fedimint_escrow_common::{
     hash256, ArbiterDecision, Disputer, EscrowCommonInit, EscrowConsensusItem, EscrowInput,
     EscrowInputError, EscrowModuleTypes, EscrowOutput, EscrowOutputError, EscrowOutputOutcome,
-    EscrowStates, MODULE_CONSENSUS_VERSION,
+    EscrowStates, TimeoutAction, MODULE_CONSENSUS_VERSION,
 };
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
@@ -69,6 +72,9 @@ impl ModuleInit for EscrowInit {
                         items,
                         "Escrow"
                     );
+                }
+                DbKeyPrefix::BlockHeight => {
+                    // Singleton key — nothing to enumerate
                 }
             }
         }
@@ -355,6 +361,64 @@ impl ServerModule for Escrow {
                     pub_key: escrow_value.arbiter_pubkey, // arbiter gets their fee
                 })
             }
+            EscrowInput::TimeoutClaim(escrow_input) => {
+                let mut escrow_value = self
+                    .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
+                    .await?;
+
+                // Only open or disputed escrows can be claimed via timeout
+                match escrow_value.state {
+                    EscrowStates::Open
+                    | EscrowStates::DisputedByBuyer
+                    | EscrowStates::DisputedBySeller => {}
+                    _ => return Err(EscrowInputError::InvalidStateForClaimingEscrow),
+                }
+
+                // Check that the timelock has expired
+                let current_height = dbtx
+                    .get_value(&BlockHeightKey)
+                    .await
+                    .ok_or(EscrowInputError::BlockHeightUnknown)?;
+                if current_height < escrow_value.timeout_block as u64 {
+                    return Err(EscrowInputError::TimelockNotExpired {
+                        current: current_height,
+                        required: escrow_value.timeout_block as u64,
+                    });
+                }
+
+                // Determine who is authorized to claim based on timeout_action
+                let (authorized_pubkey, auth_error) = match escrow_value.timeout_action {
+                    TimeoutAction::Release => (escrow_value.seller_pubkey, EscrowInputError::InvalidSeller),
+                    TimeoutAction::Refund => (escrow_value.buyer_pubkey, EscrowInputError::InvalidBuyer),
+                };
+
+                // Verify the claimant's signature
+                let secp = Secp256k1::new();
+                let message =
+                    Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
+                let (xonly_pubkey, _parity) = authorized_pubkey.x_only_public_key();
+                if secp
+                    .verify_schnorr(&escrow_input.signature, &message, &xonly_pubkey)
+                    .is_err()
+                {
+                    return Err(auth_error);
+                }
+
+                escrow_value.state = EscrowStates::TimedOut;
+
+                let escrow_key = EscrowKey {
+                    escrow_id: escrow_input.escrow_id.clone(),
+                };
+                dbtx.insert_entry(&escrow_key, &escrow_value).await;
+
+                Ok(InputMeta {
+                    amount: TransactionItemAmounts {
+                        amounts: Amounts::new_bitcoin(escrow_input.amount),
+                        fees: Amounts::ZERO,
+                    },
+                    pub_key: authorized_pubkey,
+                })
+            }
             EscrowInput::ClaimingAfterDispute(escrow_input) => {
                 let mut escrow_value = self
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
@@ -449,6 +513,8 @@ impl ServerModule for Escrow {
             secret_code_hash: output.secret_code_hash.clone(),
             max_arbiter_fee: output.max_arbiter_fee,
             state: EscrowStates::Open,
+            timeout_block: output.timeout_block,
+            timeout_action: output.timeout_action.clone(),
         };
 
         dbtx.insert_new_entry(&escrow_key, &escrow_value).await;
@@ -484,8 +550,10 @@ impl ServerModule for Escrow {
                     | EscrowStates::DisputedBySeller
                     | EscrowStates::WaitingforBuyerToClaim
                     | EscrowStates::WaitingforSellerToClaim => -(v.amount.msats as i64),
-                    // Resolved escrows have already been paid out — no liability
-                    EscrowStates::ResolvedWithoutDispute | EscrowStates::ResolvedWithDispute => 0,
+                    // Resolved/timed-out escrows have already been paid out — no liability
+                    EscrowStates::ResolvedWithoutDispute
+                    | EscrowStates::ResolvedWithDispute
+                    | EscrowStates::TimedOut => 0,
                 }
             })
             .await;
@@ -527,6 +595,8 @@ impl Escrow {
             secret_code_hash: escrow_value.secret_code_hash,
             state: escrow_value.state,
             max_arbiter_fee: escrow_value.max_arbiter_fee,
+            timeout_block: escrow_value.timeout_block,
+            timeout_action: escrow_value.timeout_action,
         };
         Ok(escrow_info)
     }

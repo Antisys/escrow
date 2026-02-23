@@ -112,6 +112,8 @@ impl EscrowClientModule {
         escrow_id: String,
         secret_code_hash: String,
         max_arbiter_fee_bps: u16,
+        timeout_block: u32,
+        timeout_action: fedimint_escrow_common::TimeoutAction,
     ) -> anyhow::Result<()> {
         let operation_id = OperationId(thread_rng().gen());
 
@@ -138,6 +140,8 @@ impl EscrowClientModule {
             escrow_id,
             secret_code_hash,
             max_arbiter_fee,
+            timeout_block,
+            timeout_action,
         };
 
         let operation_id_clone = operation_id;

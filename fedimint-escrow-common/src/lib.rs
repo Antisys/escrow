@@ -52,6 +52,17 @@ pub enum EscrowStates {
     WaitingforBuyerToClaim,
     /// seller has won the dispute and has to claim the escrow
     WaitingforSellerToClaim,
+    /// the escrow was claimed via timeout (timelock expired)
+    TimedOut,
+}
+
+/// Determines who receives funds when the timeout elapses
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable, Serialize, Deserialize)]
+pub enum TimeoutAction {
+    /// Funds go to the seller (default: seller delivered, buyer unresponsive)
+    Release,
+    /// Funds go to the buyer (default: buyer paid, seller unresponsive)
+    Refund,
 }
 
 /// The disputer in the escrow, can either be buyer or the seller
@@ -79,6 +90,8 @@ pub enum EscrowInput {
     ClaimingAfterDispute(EscrowInputClaimingAfterDispute),
     /// The input when arbiter is deciding who won the dispute
     ArbiterDecision(EscrowInputArbiterDecision),
+    /// The input when the authorized party claims after the timelock has expired
+    TimeoutClaim(EscrowInputTimeoutClaim),
 }
 /// The input for the escrow module when the seller is claiming the escrow using
 /// the secret code
@@ -111,6 +124,15 @@ pub struct EscrowInputClaimingAfterDispute {
     pub signature: Signature,
 }
 
+/// The input for claiming the escrow after the timelock has expired
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
+pub struct EscrowInputTimeoutClaim {
+    pub amount: Amount,
+    pub escrow_id: String,
+    pub hashed_message: [u8; 32],
+    pub signature: Signature,
+}
+
 /// The input for the escrow module when the seller is claiming the escrow using
 /// the secret code
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
@@ -132,6 +154,10 @@ pub struct EscrowOutput {
     pub escrow_id: String,
     pub secret_code_hash: String,
     pub max_arbiter_fee: Amount,
+    /// Bitcoin block height after which the timeout escape path is available
+    pub timeout_block: u32,
+    /// Who receives funds when the timeout elapses
+    pub timeout_action: TimeoutAction,
 }
 
 /// Errors that might be returned by the server when the buyer awaits guardians
@@ -158,6 +184,10 @@ pub enum EscrowInputError {
     InvalidArbiter,
     #[error("Invalid max arbiter fee in bps, it should be in range 10 to 1000")]
     InvalidMaxArbiterFeeBps,
+    #[error("Timelock has not expired yet (current: {current}, required: {required})")]
+    TimelockNotExpired { current: u64, required: u64 },
+    #[error("Block height is unknown — cannot verify timelock")]
+    BlockHeightUnknown,
     #[error("Invalid seller")]
     InvalidSeller,
     #[error("Invalid buyer")]
@@ -277,6 +307,11 @@ impl fmt::Display for EscrowInput {
                 input.arbiter_decision,
                 hex::encode(input.signature.as_ref()),
             ),
+            EscrowInput::TimeoutClaim(input) => write!(
+                f,
+                "EscrowInput::TimeoutClaim {{ amount: {}, escrow_id: {} }}",
+                input.amount, input.escrow_id
+            ),
         }
     }
 }
@@ -285,14 +320,16 @@ impl fmt::Display for EscrowOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "EscrowOutput {{ amount: {}, buyer_pubkey: {:?}, seller_pubkey: {:?}, arbiter_pubkey: {:?}, escrow_id: {}, secret_code_hash: {}, max_arbiter_fee: {} }}",
+            "EscrowOutput {{ amount: {}, buyer_pubkey: {:?}, seller_pubkey: {:?}, arbiter_pubkey: {:?}, escrow_id: {}, secret_code_hash: {}, max_arbiter_fee: {}, timeout_block: {}, timeout_action: {:?} }}",
             self.amount,
             self.buyer_pubkey,
             self.seller_pubkey,
             self.arbiter_pubkey,
             self.escrow_id,
             self.secret_code_hash,
-            self.max_arbiter_fee
+            self.max_arbiter_fee,
+            self.timeout_block,
+            self.timeout_action
         )
     }
 }

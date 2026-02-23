@@ -2,7 +2,7 @@ use fedimint_core::Amount;
 use secp256k1::PublicKey;
 use serde::{Deserialize, Serialize};
 
-use super::EscrowStates;
+use super::{EscrowStates, TimeoutAction};
 
 /// get escrow information in the client side
 pub const GET_MODULE_INFO: &str = "get_module_info";
@@ -17,4 +17,6 @@ pub struct EscrowInfo {
     pub secret_code_hash: String,
     pub state: EscrowStates,
     pub max_arbiter_fee: Amount,
+    pub timeout_block: u32,
+    pub timeout_action: TimeoutAction,
 }

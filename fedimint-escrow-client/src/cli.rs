@@ -3,7 +3,7 @@ use std::{ffi, iter};
 use clap::Parser;
 use fedimint_core::Amount;
 use fedimint_escrow_common::endpoints::EscrowInfo;
-use fedimint_escrow_common::hash256;
+use fedimint_escrow_common::{TimeoutAction, hash256};
 use random_string::generate;
 use secp256k1::PublicKey;
 use serde::Serialize;
@@ -19,6 +19,11 @@ enum Command {
         arbiter_pubkey: PublicKey,
         cost: Amount,             // actual cost of product
         max_arbiter_fee_bps: u16, // maximum arbiter fee in basis points
+        /// Bitcoin block height after which the timeout escape is available
+        timeout_block: u32,
+        /// Who gets funds on timeout: "release" (seller) or "refund" (buyer)
+        #[arg(default_value = "refund")]
+        timeout_action: String,
     },
     Info {
         escrow_id: String,
@@ -58,6 +63,8 @@ pub(crate) async fn handle_cli_command(
             arbiter_pubkey,
             cost,
             max_arbiter_fee_bps,
+            timeout_block,
+            timeout_action,
         } => {
             // Create a random escrow id, which will only be known by the buyer, and will be
             // shared to seller or arbiter by the buyer
@@ -74,6 +81,11 @@ pub(crate) async fn handle_cli_command(
 
             let secret_code_hash = hash256(secret_code.clone());
 
+            let timeout_action_parsed = match timeout_action.to_lowercase().as_str() {
+                "release" => TimeoutAction::Release,
+                _ => TimeoutAction::Refund,
+            };
+
             // finalize_and_submit txns to lock ecash by underfunding to create an escrow
             escrow
                 .create_escrow(
@@ -83,6 +95,8 @@ pub(crate) async fn handle_cli_command(
                     escrow_id.clone(),
                     secret_code_hash,
                     max_arbiter_fee_bps,
+                    timeout_block,
+                    timeout_action_parsed,
                 )
                 .await?;
 
