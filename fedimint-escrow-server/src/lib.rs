@@ -1,4 +1,5 @@
 mod db;
+mod oracle;
 
 #[cfg(test)]
 mod tests;
@@ -8,7 +9,10 @@ use std::collections::BTreeMap;
 use anyhow::bail;
 use async_trait::async_trait;
 pub use db::EscrowValue;
-use db::{BlockHeightKey, DbKeyPrefix, EscrowKey, EscrowKeyPrefix};
+use db::{
+    AllPendingOracleAttestationsPrefix, BlockHeightKey, DbKeyPrefix, EscrowKey, EscrowKeyPrefix,
+    PendingOracleAttestationKey,
+};
 use fedimint_core::config::{
     ServerModuleConfig, ServerModuleConsensusConfig, TypedServerModuleConfig,
     TypedServerModuleConsensusConfig,
@@ -28,10 +32,11 @@ use fedimint_escrow_common::config::{
     EscrowClientConfig, EscrowConfig, EscrowConfigConsensus, EscrowConfigPrivate,
 };
 use fedimint_escrow_common::endpoints::{EscrowInfo, GET_MODULE_INFO};
+use fedimint_escrow_common::oracle::Beneficiary;
 use fedimint_escrow_common::{
-    hash256, ArbiterDecision, Disputer, EscrowCommonInit, EscrowConsensusItem, EscrowInput,
-    EscrowInputError, EscrowModuleTypes, EscrowOutput, EscrowOutputError, EscrowOutputOutcome,
-    EscrowStates, TimeoutAction, MODULE_CONSENSUS_VERSION,
+    hash256, Disputer, EscrowCommonInit, EscrowConsensusItem, EscrowInput, EscrowInputError,
+    EscrowModuleTypes, EscrowOutput, EscrowOutputError, EscrowOutputOutcome, EscrowStates,
+    TimeoutAction, MODULE_CONSENSUS_VERSION,
 };
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
@@ -75,6 +80,16 @@ impl ModuleInit for EscrowInit {
                 }
                 DbKeyPrefix::BlockHeight => {
                     // Singleton key — nothing to enumerate
+                }
+                DbKeyPrefix::PendingOracleAttestation => {
+                    push_db_pair_items!(
+                        dbtx,
+                        AllPendingOracleAttestationsPrefix,
+                        PendingOracleAttestationKey,
+                        fedimint_escrow_common::oracle::SignedAttestation,
+                        items,
+                        "PendingOracleAttestation"
+                    );
                 }
             }
         }
@@ -121,7 +136,6 @@ impl ServerModuleInit for EscrowInit {
                     private: EscrowConfigPrivate,
                     consensus: EscrowConfigConsensus {
                         deposit_fee: Amount::ZERO,
-                        max_arbiter_fee_bps: 1000, // 10% max arbiter fee
                     },
                 };
                 (peer, config.to_erased())
@@ -139,7 +153,6 @@ impl ServerModuleInit for EscrowInit {
             private: EscrowConfigPrivate,
             consensus: EscrowConfigConsensus {
                 deposit_fee: Amount::ZERO,
-                max_arbiter_fee_bps: 1000,
             },
         }
         .to_erased())
@@ -153,7 +166,6 @@ impl ServerModuleInit for EscrowInit {
         let config = EscrowConfigConsensus::from_erased(config)?;
         Ok(EscrowClientConfig {
             deposit_fee: config.deposit_fee,
-            max_arbiter_fee_bps: config.max_arbiter_fee_bps,
         })
     }
 
@@ -185,20 +197,55 @@ impl ServerModule for Escrow {
     type Common = EscrowModuleTypes;
     type Init = EscrowInit;
 
+    /// Propose pending oracle attestations accumulated in this guardian's DB
     async fn consensus_proposal(
         &self,
-        _dbtx: &mut DatabaseTransaction<'_>,
+        dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<EscrowConsensusItem> {
-        Vec::new()
+        dbtx.find_by_prefix(&AllPendingOracleAttestationsPrefix)
+            .await
+            .map(|(k, v)| EscrowConsensusItem::OracleAttestation {
+                escrow_id: k.escrow_id,
+                attestation: v,
+            })
+            .collect::<Vec<_>>()
+            .await
     }
 
+    /// Validate and store a confirmed oracle attestation from any peer
     async fn process_consensus_item<'a, 'b>(
         &'a self,
-        _dbtx: &mut DatabaseTransaction<'b>,
-        _consensus_item: EscrowConsensusItem,
+        dbtx: &mut DatabaseTransaction<'b>,
+        consensus_item: EscrowConsensusItem,
         _peer_id: PeerId,
     ) -> anyhow::Result<()> {
-        bail!("The escrow module does not use consensus items");
+        match consensus_item {
+            EscrowConsensusItem::OracleAttestation { escrow_id, attestation } => {
+                // Escrow must exist
+                let Some(escrow_value) = dbtx
+                    .get_value(&EscrowKey { escrow_id: escrow_id.clone() })
+                    .await
+                else {
+                    bail!("Escrow not found: {escrow_id}");
+                };
+
+                // Validate the individual attestation
+                oracle::verify_attestation(
+                    &attestation,
+                    &escrow_value.oracle_pubkeys,  // Vec<PublicKey> coerces to &[PublicKey]
+                    &escrow_id,
+                )
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+                // Store (or overwrite) in pending attestation DB keyed by escrow + oracle pubkey
+                let pending_key = PendingOracleAttestationKey {
+                    escrow_id,
+                    pubkey: attestation.pubkey,
+                };
+                dbtx.insert_entry(&pending_key, &attestation).await;
+                Ok(())
+            }
+        }
     }
 
     async fn process_input<'a, 'b, 'c>(
@@ -231,7 +278,6 @@ impl ServerModule for Escrow {
                 }
                 escrow_value.state = EscrowStates::ResolvedWithoutDispute;
 
-                // Update the escrow value in the database
                 let escrow_key = EscrowKey {
                     escrow_id: escrow_input.escrow_id.clone(),
                 };
@@ -242,7 +288,7 @@ impl ServerModule for Escrow {
                         amounts: Amounts::new_bitcoin(escrow_input.amount),
                         fees: Amounts::ZERO,
                     },
-                    pub_key: escrow_value.seller_pubkey, // seller gets the ecash
+                    pub_key: escrow_value.seller_pubkey,
                 })
             }
             EscrowInput::Disputing(escrow_input) => {
@@ -277,7 +323,7 @@ impl ServerModule for Escrow {
                     .verify_schnorr(&escrow_input.signature, &message, &xonly_pubkey)
                     .is_err()
                 {
-                    return Err(EscrowInputError::InvalidArbiter);
+                    return Err(EscrowInputError::InvalidOracleSignature);
                 }
 
                 match escrow_value.state {
@@ -290,7 +336,6 @@ impl ServerModule for Escrow {
                     _ => return Err(EscrowInputError::InvalidStateForInitiatingDispute),
                 }
 
-                // Update the escrow value in the database
                 let escrow_key = EscrowKey {
                     escrow_id: escrow_input.escrow_id.clone(),
                 };
@@ -304,61 +349,56 @@ impl ServerModule for Escrow {
                     pub_key: escrow_input.disputer,
                 })
             }
-            EscrowInput::ArbiterDecision(escrow_input) => {
+            EscrowInput::OracleAttestation(escrow_input) => {
                 let mut escrow_value = self
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;
 
-                // the escrow state should be disputed for the arbiter to take decision
-                if escrow_value.state != EscrowStates::DisputedByBuyer
-                    && escrow_value.state != EscrowStates::DisputedBySeller
-                {
-                    return Err(EscrowInputError::EscrowNotDisputed);
+                // Escrow must be in a disputed state for oracle resolution
+                match escrow_value.state {
+                    EscrowStates::DisputedByBuyer | EscrowStates::DisputedBySeller => {}
+                    _ => return Err(EscrowInputError::InvalidStateForClaimingEscrow),
                 }
 
-                // check the signature of arbiter
-                let secp = Secp256k1::new();
-                let message = Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
-                let (xonly_pubkey, _parity) = escrow_value.arbiter_pubkey.x_only_public_key();
-
-                if secp
-                    .verify_schnorr(&escrow_input.signature, &message, &xonly_pubkey)
-                    .is_err()
-                {
-                    return Err(EscrowInputError::InvalidArbiter);
-                }
-
-                // Validate arbiter's fee
-                if escrow_input.amount > escrow_value.max_arbiter_fee {
-                    return Err(EscrowInputError::ArbiterFeeExceedsMaximum);
-                } else {
-                    escrow_value.amount = escrow_value.amount
-                        .checked_sub(escrow_input.amount)
-                        .expect("arbiter fee already validated <= max_arbiter_fee");
-                }
-
-                // Update the escrow state based on the arbiter's decision
-                match escrow_input.arbiter_decision {
-                    ArbiterDecision::BuyerWins => {
-                        escrow_value.state = EscrowStates::WaitingforBuyerToClaim;
+                // Verify 2-of-3 oracle threshold
+                let beneficiary = oracle::verify_threshold(
+                    &escrow_input.attestations,
+                    &escrow_value.oracle_pubkeys,  // Vec<PublicKey> coerces to &[PublicKey]
+                    &escrow_input.escrow_id,
+                )
+                .map_err(|e| match e {
+                    oracle::OracleVerifyError::InvalidSignature => {
+                        EscrowInputError::InvalidOracleSignature
                     }
-                    ArbiterDecision::SellerWins => {
-                        escrow_value.state = EscrowStates::WaitingforSellerToClaim;
+                    oracle::OracleVerifyError::UnknownOracle => EscrowInputError::UnknownOracle,
+                    oracle::OracleVerifyError::EscrowIdMismatch => EscrowInputError::EscrowIdMismatch,
+                    oracle::OracleVerifyError::ConflictingOutcomes => {
+                        EscrowInputError::ConflictingOracleOutcomes
                     }
-                }
+                    oracle::OracleVerifyError::ThresholdNotMet { .. } => {
+                        EscrowInputError::OracleThresholdNotMet
+                    }
+                })?;
 
-                // Update the escrow value in the database
+                escrow_value.state = EscrowStates::ResolvedByOracle;
+
                 let escrow_key = EscrowKey {
                     escrow_id: escrow_input.escrow_id.clone(),
                 };
                 dbtx.insert_entry(&escrow_key, &escrow_value).await;
+
+                // Winner gets the ecash
+                let winner_pubkey = match beneficiary {
+                    Beneficiary::Buyer => escrow_value.buyer_pubkey,
+                    Beneficiary::Seller => escrow_value.seller_pubkey,
+                };
 
                 Ok(InputMeta {
                     amount: TransactionItemAmounts {
                         amounts: Amounts::new_bitcoin(escrow_input.amount),
                         fees: Amounts::ZERO,
                     },
-                    pub_key: escrow_value.arbiter_pubkey, // arbiter gets their fee
+                    pub_key: winner_pubkey,
                 })
             }
             EscrowInput::TimeoutClaim(escrow_input) => {
@@ -419,73 +459,6 @@ impl ServerModule for Escrow {
                     pub_key: authorized_pubkey,
                 })
             }
-            EscrowInput::ClaimingAfterDispute(escrow_input) => {
-                let mut escrow_value = self
-                    .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
-                    .await?;
-                match escrow_value.state {
-                    EscrowStates::WaitingforBuyerToClaim => {
-                        // check the signature of buyer
-                        let secp = Secp256k1::new();
-                        let message =
-                            Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
-                        let (xonly_pubkey, _parity) = escrow_value.buyer_pubkey.x_only_public_key();
-
-                        if secp
-                            .verify_schnorr(&escrow_input.signature, &message, &xonly_pubkey)
-                            .is_err()
-                        {
-                            return Err(EscrowInputError::InvalidBuyer);
-                        }
-                        escrow_value.state = EscrowStates::ResolvedWithDispute;
-
-                        // Update the escrow value in the database
-                        let escrow_key = EscrowKey {
-                            escrow_id: escrow_input.escrow_id.clone(),
-                        };
-                        dbtx.insert_entry(&escrow_key, &escrow_value).await;
-
-                        Ok(InputMeta {
-                            amount: TransactionItemAmounts {
-                                amounts: Amounts::new_bitcoin(escrow_input.amount),
-                                fees: Amounts::ZERO,
-                            },
-                            pub_key: escrow_value.buyer_pubkey, // FIX: buyer wins, buyer gets ecash
-                        })
-                    }
-                    EscrowStates::WaitingforSellerToClaim => {
-                        // check the signature of seller
-                        let secp = Secp256k1::new();
-                        let message =
-                            Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
-                        let (xonly_pubkey, _parity) =
-                            escrow_value.seller_pubkey.x_only_public_key();
-
-                        if secp
-                            .verify_schnorr(&escrow_input.signature, &message, &xonly_pubkey)
-                            .is_err()
-                        {
-                            return Err(EscrowInputError::InvalidSeller);
-                        }
-                        escrow_value.state = EscrowStates::ResolvedWithDispute;
-
-                        // Update the escrow value in the database
-                        let escrow_key = EscrowKey {
-                            escrow_id: escrow_input.escrow_id.clone(),
-                        };
-                        dbtx.insert_entry(&escrow_key, &escrow_value).await;
-
-                        Ok(InputMeta {
-                            amount: TransactionItemAmounts {
-                                amounts: Amounts::new_bitcoin(escrow_input.amount),
-                                fees: Amounts::ZERO,
-                            },
-                            pub_key: escrow_value.seller_pubkey, // seller wins, seller gets ecash
-                        })
-                    }
-                    _ => Err(EscrowInputError::InvalidStateForClaimingEscrow),
-                }
-            }
         }
     }
 
@@ -505,13 +478,17 @@ impl ServerModule for Escrow {
         let escrow_key = EscrowKey {
             escrow_id: output.escrow_id.clone(),
         };
+        // Validate exactly 3 oracle pubkeys
+        if output.oracle_pubkeys.len() != 3 {
+            return Err(EscrowOutputError::EscrowAlreadyExists); // reuse error for now
+        }
+
         let escrow_value = EscrowValue {
             buyer_pubkey: output.buyer_pubkey,
             seller_pubkey: output.seller_pubkey,
-            arbiter_pubkey: output.arbiter_pubkey,
+            oracle_pubkeys: output.oracle_pubkeys.clone(),
             amount: output.amount,
             secret_code_hash: output.secret_code_hash.clone(),
-            max_arbiter_fee: output.max_arbiter_fee,
             state: EscrowStates::Open,
             timeout_block: output.timeout_block,
             timeout_action: output.timeout_action.clone(),
@@ -547,13 +524,12 @@ impl ServerModule for Escrow {
                 match v.state {
                     EscrowStates::Open
                     | EscrowStates::DisputedByBuyer
-                    | EscrowStates::DisputedBySeller
-                    | EscrowStates::WaitingforBuyerToClaim
-                    | EscrowStates::WaitingforSellerToClaim => -(v.amount.msats as i64),
-                    // Resolved/timed-out escrows have already been paid out — no liability
+                    | EscrowStates::DisputedBySeller => -(v.amount.msats as i64),
+                    // Resolved/timed-out/oracle-resolved escrows have been paid out — no liability
                     EscrowStates::ResolvedWithoutDispute
                     | EscrowStates::ResolvedWithDispute
-                    | EscrowStates::TimedOut => 0,
+                    | EscrowStates::TimedOut
+                    | EscrowStates::ResolvedByOracle => 0,
                 }
             })
             .await;
@@ -590,11 +566,10 @@ impl Escrow {
         let escrow_info = EscrowInfo {
             buyer_pubkey: escrow_value.buyer_pubkey,
             seller_pubkey: escrow_value.seller_pubkey,
-            arbiter_pubkey: escrow_value.arbiter_pubkey,
+            oracle_pubkeys: escrow_value.oracle_pubkeys,
             amount: escrow_value.amount,
             secret_code_hash: escrow_value.secret_code_hash,
             state: escrow_value.state,
-            max_arbiter_fee: escrow_value.max_arbiter_fee,
             timeout_block: escrow_value.timeout_block,
             timeout_action: escrow_value.timeout_action,
         };
