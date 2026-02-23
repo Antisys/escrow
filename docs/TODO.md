@@ -1,6 +1,6 @@
 # Fedimint Escrow — Master Todo List
 
-Last updated: 2026-02-23 (Phase 2 complete)
+Last updated: 2026-02-23 (Phase 3 + partial Phase 4 complete)
 Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ---
@@ -67,40 +67,42 @@ Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 **Context:** Replace single `arbiter_pubkey: PublicKey` with `oracle_pubkeys: [PublicKey; 3]` and 2-of-3 threshold verification.
 
-- [ ] Create `oracle.rs` in common crate
-- [ ] Define `OracleAttestationContent` struct (escrow_id, outcome, decided_at, evidence_hash)
-- [ ] Define `SignedAttestation` struct (pubkey, event_id, signature, content)
-- [ ] Define `ORACLE_ATTESTATION_KIND` constant (30001)
-- [ ] Add `nostr` crate dependency to Cargo.toml
-- [ ] Replace `arbiter_pubkey: PublicKey` with `oracle_pubkeys: [PublicKey; 3]` in EscrowOutput
-- [ ] Implement `verify_attestation()` (single Schnorr signature check)
-- [ ] Implement `verify_threshold()` (2-of-3 agreeing signatures)
-- [ ] Replace single-arbiter `ArbiterDecision` input path with `OracleAttestation` path
-- [ ] Implement `consensus_proposal()` (propagate pending attestations)
-- [ ] Implement `process_consensus_item()` (confirm attestations)
-- [ ] Create `tools/oracle_sign.py` for testing
-- [ ] Write test: single valid signature (threshold fails — needs 2)
-- [ ] Write test: two valid signatures same outcome (threshold passes)
-- [ ] Write test: conflicting outcomes rejected
-- [ ] Write test: unknown arbitrator rejected
-- [ ] Write test: wrong escrow_id rejected
-- [ ] All oracle tests pass
+- [x] Create `oracle.rs` in common crate
+- [x] Define `OracleAttestationContent` struct (escrow_id, outcome, decided_at, reason)
+- [x] Define `SignedAttestation` struct (pubkey, signature, content)
+- [x] Define `ORACLE_ATTESTATION_KIND` constant (30001)
+- [x] Replace `arbiter_pubkey: PublicKey` with `oracle_pubkeys: Vec<PublicKey>` in EscrowOutput
+- [x] Implement `verify_attestation()` (single Schnorr signature check)
+- [x] Implement `verify_threshold()` (2-of-3 agreeing signatures, pubkey dedup, conflict detection)
+- [x] Replace single-arbiter `ArbiterDecision` input path with `OracleAttestation` path
+- [x] Implement `consensus_proposal()` (propagate pending attestations)
+- [x] Implement `process_consensus_item()` (validate + store attestations in PendingOracleAttestation DB)
+- [x] Create `tools/oracle_sign.py` for testing
+- [x] Write test: single valid signature (threshold fails — needs 2)
+- [x] Write test: two valid signatures same outcome (threshold passes — buyer wins + seller wins)
+- [x] Write test: conflicting outcomes rejected
+- [x] Write test: unknown oracle pubkey rejected
+- [x] Write test: wrong escrow_id rejected
+- [x] Write test: duplicate oracle pubkey counts once
+- [x] Write test: non-disputed state rejected
+- [x] All oracle tests pass (17 total, 0 failed)
 
 ---
 
 ## Phase 4: Client Module
 
 - [x] Understand existing client module (`/home/ralf/fedimint-escrow/fedimint-escrow-client/`)
-- [ ] Implement `create_escrow()` (submit EscrowOutput transaction)
-- [ ] Implement `release_cooperative()` (submit ClamingWithoutDispute input)
-- [ ] Implement `refund_cooperative()` (same with buyer as beneficiary)
-- [ ] Implement `resolve_via_oracle()` (submit OracleAttestation input)
-- [ ] Implement `claim_timeout()` (submit TimeoutClaim input after timeout)
+- [x] Implement `create_escrow()` (submit EscrowOutput transaction)
+- [x] Implement `claim_escrow()` / cooperative release (submit ClamingWithoutDispute input)
+- [x] Implement `initiate_dispute()` (submit Disputing input)
+- [x] Implement `resolve_via_oracle()` (submit OracleAttestation input)
+- [x] Implement `claim_timeout()` (submit TimeoutClaim input after timeout)
+- [x] CLI commands: create, info, claim, dispute, resolve-oracle, claim-timeout, public-key
 - [ ] Create Python bridge `backend/fedimint/escrow_client.py`
 - [ ] Test `create_escrow` via Python bridge
 - [ ] Test `release_escrow` via Python bridge
 - [ ] Test `refund_escrow` via Python bridge
-- [ ] `cargo test` passes
+- [ ] `cargo test` passes (all client tests)
 
 ---
 
@@ -174,4 +176,4 @@ Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ---
 
-*Total tasks: ~110  |  Completed: 28  |  Phase 2 complete — next: Phase 3 (Nostr Oracle)*
+*Total tasks: ~110  |  Completed: 47  |  Phase 3 complete, Phase 4 Rust client complete — next: Python bridge*
