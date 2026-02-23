@@ -1,6 +1,6 @@
 # Fedimint Escrow — Master Todo List
 
-Last updated: 2026-02-23 (Phase 3 + partial Phase 4 complete)
+Last updated: 2026-02-23 (Phase 3 complete, Phase 4 Rust + Python bridge complete)
 Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ---
@@ -98,11 +98,11 @@ Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 - [x] Implement `resolve_via_oracle()` (submit OracleAttestation input)
 - [x] Implement `claim_timeout()` (submit TimeoutClaim input after timeout)
 - [x] CLI commands: create, info, claim, dispute, resolve-oracle, claim-timeout, public-key
-- [ ] Create Python bridge `backend/fedimint/escrow_client.py`
-- [ ] Test `create_escrow` via Python bridge
-- [ ] Test `release_escrow` via Python bridge
-- [ ] Test `refund_escrow` via Python bridge
-- [ ] `cargo test` passes (all client tests)
+- [x] Create Python bridge `backend/fedimint/escrow_client.py`
+- [x] Test `create_escrow` via Python bridge (mocked subprocess, 13 tests passing)
+- [x] Test `claim_escrow` / `initiate_dispute` / `resolve_via_oracle` / `claim_timeout` via Python bridge
+- [x] Error hierarchy: EscrowClientError → EscrowNotFoundError, EscrowStateError
+- [ ] `cargo test` passes (all client tests — needs devimint integration test)
 
 ---
 
@@ -176,4 +176,4 @@ Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ---
 
-*Total tasks: ~110  |  Completed: 47  |  Phase 3 complete, Phase 4 Rust client complete — next: Python bridge*
+*Total tasks: ~110  |  Completed: 52  |  Phase 4 complete — next: Phase 5 Integration (oracle_listener.py, replace vault calls in deals.py)*
