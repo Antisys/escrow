@@ -1,6 +1,6 @@
 # Fedimint Escrow — Master Todo List
 
-Last updated: 2026-02-23 (Phase 3 complete, Phase 4 Rust + Python bridge complete)
+Last updated: 2026-02-23 (Phase 4 complete, oracle_listener.py done)
 Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ---
@@ -108,9 +108,13 @@ Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ## Phase 5: Integration
 
-- [ ] Create `backend/fedimint/` directory
-- [ ] Create `backend/fedimint/escrow_client.py`
-- [ ] Create `backend/fedimint/oracle_listener.py`
+- [x] Create `backend/fedimint/` directory
+- [x] Create `backend/fedimint/escrow_client.py` (13 tests passing)
+- [x] Create `backend/fedimint/oracle_listener.py` (18 tests passing)
+  - Multi-relay fan-out, exponential backoff reconnect
+  - 2-of-3 accumulator with pubkey dedup and outcome conflict detection
+  - Nostr x-only <-> compressed pubkey conversion
+  - Python 3.12 task-cancel-before-first-step gotcha fixed
 - [ ] Replace vault calls in `deals.py` with Fedimint client calls
 - [ ] Replace `liquidSigner.js` with simple message signing
 - [ ] Update `crypto.js` — remove ephemeral key/Liquid logic
@@ -176,4 +180,4 @@ Legend: [ ] pending  [x] done  [~] in progress  [!] blocked
 
 ---
 
-*Total tasks: ~110  |  Completed: 52  |  Phase 4 complete — next: Phase 5 Integration (oracle_listener.py, replace vault calls in deals.py)*
+*Total tasks: ~110  |  Completed: 55  |  Phase 4 complete + oracle_listener.py done — next: replace vault calls in deals.py*
