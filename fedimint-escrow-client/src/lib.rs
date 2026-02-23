@@ -25,9 +25,11 @@ use fedimint_core::secp256k1::{Keypair, Message, Secp256k1};
 use fedimint_core::{apply, async_trait_maybe_send, Amount, OutPoint};
 use fedimint_escrow_common::config::EscrowClientConfig;
 use fedimint_escrow_common::endpoints::EscrowInfo;
+use fedimint_escrow_common::oracle::SignedAttestation;
 use fedimint_escrow_common::{
     EscrowCommonInit, EscrowError, EscrowInput, EscrowInputClamingWithoutDispute,
-    EscrowInputDisputing, EscrowModuleTypes, EscrowOutput, EscrowStates, KIND,
+    EscrowInputDisputing, EscrowInputOracleAttestation, EscrowInputTimeoutClaim,
+    EscrowModuleTypes, EscrowOutput, EscrowStates, KIND,
 };
 use futures::StreamExt;
 use rand::{thread_rng, Rng};
@@ -267,6 +269,139 @@ impl EscrowClientModule {
             input,
             keys: vec![self.key],
             amounts: Amounts::ZERO,
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
+                vec![EscrowStateMachine {
+                    operation_id: operation_id_clone,
+                }]
+            }),
+        };
+
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
+            .client_ctx
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
+            .await?;
+
+        let mut updates = self
+            .subscribe_transactions_output(operation_id, out_point_range)
+            .await
+            .unwrap()
+            .into_stream();
+
+        while let Some(update) = updates.next().await {
+            match update {
+                EscrowOperationState::Created | EscrowOperationState::Accepted => {}
+                EscrowOperationState::Rejected => {
+                    return Err(anyhow::anyhow!(EscrowError::TransactionRejected));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resolves a disputed escrow via 2-of-3 oracle attestations.
+    /// The winning party (buyer or seller) receives the escrow amount as ecash.
+    /// Attestations must include at least 2 agreeing signatures from the registered oracle set.
+    pub async fn resolve_via_oracle(
+        &self,
+        escrow_id: String,
+        attestations: Vec<SignedAttestation>,
+    ) -> anyhow::Result<()> {
+        let escrow_value: EscrowInfo = self.module_api.get_escrow_info(escrow_id.clone()).await?;
+
+        // Only disputed escrows can be resolved via oracle
+        if escrow_value.state != EscrowStates::DisputedByBuyer
+            && escrow_value.state != EscrowStates::DisputedBySeller
+        {
+            return Err(anyhow::anyhow!(EscrowError::EscrowNotFound));
+        }
+
+        let operation_id = OperationId(thread_rng().gen());
+        let input = EscrowInput::OracleAttestation(EscrowInputOracleAttestation {
+            amount: escrow_value.amount,
+            escrow_id,
+            attestations,
+        });
+
+        let operation_id_clone = operation_id;
+        let client_input = ClientInput {
+            input,
+            keys: vec![self.key],
+            amounts: Amounts::new_bitcoin(escrow_value.amount),
+        };
+        let input_sm = ClientInputSM {
+            state_machines: Arc::new(move |_: OutPointRange| {
+                vec![EscrowStateMachine {
+                    operation_id: operation_id_clone,
+                }]
+            }),
+        };
+
+        let tx = TransactionBuilder::new().with_inputs(
+            self.client_ctx
+                .make_client_inputs(ClientInputBundle::new(vec![client_input], vec![input_sm])),
+        );
+        let out_point_range = self
+            .client_ctx
+            .finalize_and_submit_transaction(operation_id, KIND.as_str(), |_| (), tx)
+            .await?;
+
+        let mut updates = self
+            .subscribe_transactions_output(operation_id, out_point_range)
+            .await
+            .unwrap()
+            .into_stream();
+
+        while let Some(update) = updates.next().await {
+            match update {
+                EscrowOperationState::Created | EscrowOperationState::Accepted => {}
+                EscrowOperationState::Rejected => {
+                    return Err(anyhow::anyhow!(EscrowError::TransactionRejected));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Claims an escrow after the timelock has expired.
+    /// The caller must be the party authorized by `timeout_action`:
+    /// - `TimeoutAction::Refund` → buyer reclaims
+    /// - `TimeoutAction::Release` → seller claims
+    pub async fn claim_timeout(&self, escrow_id: String) -> anyhow::Result<()> {
+        let escrow_value: EscrowInfo = self.module_api.get_escrow_info(escrow_id.clone()).await?;
+
+        // Only Open escrows can be claimed via timeout (disputed escrows use oracle path)
+        if escrow_value.state != EscrowStates::Open {
+            return Err(anyhow::anyhow!(EscrowError::EscrowNotFound));
+        }
+
+        let secp = Secp256k1::new();
+        let mut hasher = Sha256::new();
+        hasher.update("timeout".as_bytes());
+        let hashed_message: [u8; 32] = hasher.finalize().into();
+        let message = Message::from_digest_slice(&hashed_message).expect("32 bytes");
+        let signature = secp.sign_schnorr(&message, &self.key);
+
+        let operation_id = OperationId(thread_rng().gen());
+        let input = EscrowInput::TimeoutClaim(EscrowInputTimeoutClaim {
+            amount: escrow_value.amount,
+            escrow_id,
+            hashed_message,
+            signature,
+        });
+
+        let operation_id_clone = operation_id;
+        let client_input = ClientInput {
+            input,
+            keys: vec![self.key],
+            amounts: Amounts::new_bitcoin(escrow_value.amount),
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
