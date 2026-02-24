@@ -38,6 +38,7 @@ use fedimint_escrow_common::{
     EscrowModuleTypes, EscrowOutput, EscrowOutputError, EscrowOutputOutcome, EscrowStates,
     TimeoutAction, MODULE_CONSENSUS_VERSION,
 };
+use fedimint_server_core::bitcoin_rpc::ServerBitcoinRpcMonitor;
 use fedimint_server_core::config::PeerHandleOps;
 use fedimint_server_core::migration::ServerModuleDbMigrationFn;
 use fedimint_server_core::{
@@ -120,7 +121,7 @@ impl ServerModuleInit for EscrowInit {
 
     /// Initialize the module
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
-        Ok(Escrow::new(args.cfg().to_typed()?))
+        Ok(Escrow::new(args.cfg().to_typed()?, args.server_bitcoin_rpc_monitor()))
     }
 
     /// Generates configs for all peers in a trusted manner for testing
@@ -188,6 +189,8 @@ impl ServerModuleInit for EscrowInit {
 #[derive(Debug)]
 pub struct Escrow {
     pub cfg: EscrowConfig,
+    /// Bitcoin RPC monitor for block height tracking. None in unit tests.
+    bitcoin_rpc: Option<ServerBitcoinRpcMonitor>,
 }
 
 /// Implementation of consensus for the server module
@@ -197,19 +200,30 @@ impl ServerModule for Escrow {
     type Common = EscrowModuleTypes;
     type Init = EscrowInit;
 
-    /// Propose pending oracle attestations accumulated in this guardian's DB
+    /// Propose pending oracle attestations and current block height.
     async fn consensus_proposal(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
     ) -> Vec<EscrowConsensusItem> {
-        dbtx.find_by_prefix(&AllPendingOracleAttestationsPrefix)
+        let mut items: Vec<EscrowConsensusItem> = dbtx
+            .find_by_prefix(&AllPendingOracleAttestationsPrefix)
             .await
             .map(|(k, v)| EscrowConsensusItem::OracleAttestation {
                 escrow_id: k.escrow_id,
                 attestation: v,
             })
             .collect::<Vec<_>>()
-            .await
+            .await;
+
+        // Propose current block height so the module can enforce timelocks.
+        // status() reads from a cached watch channel — cheap, non-blocking.
+        if let Some(rpc) = &self.bitcoin_rpc {
+            if let Some(status) = rpc.status() {
+                items.push(EscrowConsensusItem::BlockHeight(status.block_count));
+            }
+        }
+
+        items
     }
 
     /// Validate and store a confirmed oracle attestation from any peer
@@ -220,6 +234,14 @@ impl ServerModule for Escrow {
         _peer_id: PeerId,
     ) -> anyhow::Result<()> {
         match consensus_item {
+            EscrowConsensusItem::BlockHeight(new_height) => {
+                // Only advance block height, never go backwards.
+                let current = dbtx.get_value(&BlockHeightKey).await.unwrap_or(0);
+                if new_height > current {
+                    dbtx.insert_entry(&BlockHeightKey, &new_height).await;
+                }
+                Ok(())
+            }
             EscrowConsensusItem::OracleAttestation { escrow_id, attestation } => {
                 // Escrow must exist
                 let Some(escrow_value) = dbtx
@@ -259,6 +281,11 @@ impl ServerModule for Escrow {
                 let mut escrow_value = self
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;
+
+                // Only allow claiming from Open state (prevents double-spend)
+                if escrow_value.state != EscrowStates::Open {
+                    return Err(EscrowInputError::InvalidStateForClaimingEscrow);
+                }
 
                 // check the signature of seller
                 let secp = Secp256k1::new();
@@ -550,8 +577,14 @@ impl ServerModule for Escrow {
 
 impl Escrow {
     /// Create new module instance
-    pub fn new(cfg: EscrowConfig) -> Escrow {
-        Escrow { cfg }
+    pub fn new(cfg: EscrowConfig, bitcoin_rpc: ServerBitcoinRpcMonitor) -> Escrow {
+        Escrow { cfg, bitcoin_rpc: Some(bitcoin_rpc) }
+    }
+
+    /// Constructor for unit tests — no Bitcoin RPC (block height proposals disabled).
+    #[cfg(test)]
+    pub fn new_for_testing(cfg: EscrowConfig) -> Escrow {
+        Escrow { cfg, bitcoin_rpc: None }
     }
 
     async fn handle_get_module_info(

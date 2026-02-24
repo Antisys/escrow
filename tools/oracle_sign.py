@@ -45,21 +45,30 @@ def attestation_signing_bytes(pubkey_hex: str, escrow_id: str, outcome: str, dec
 def sign_attestation(privkey_hex: str, escrow_id: str, outcome: str, decided_at: int) -> dict:
     """
     Sign an oracle attestation and return the full attestation as a dict.
+
+    The "pubkey" field uses the full 33-byte compressed form (66 hex chars) so that
+    fedimint-cli can parse it as a secp256k1::PublicKey and match against the oracle
+    pubkeys registered in the escrow output.
+
+    The signing message (inside attestation_signing_bytes) uses the x-only (32-byte)
+    form, which is the BIP-340 / Nostr convention and matches the Rust implementation.
     """
     privkey_bytes = bytes.fromhex(privkey_hex)
     privkey = PrivateKey(privkey_bytes)
 
-    # x-only pubkey (32 bytes), hex-encoded
-    pubkey_hex = privkey.pubkey.serialize(compressed=True).hex()[2:]  # drop 02/03 prefix for x-only
+    # Full compressed pubkey (33 bytes = 66 hex chars) — what fedimint-cli parses
+    pubkey_full_hex = privkey.pubkey.serialize(compressed=True).hex()
+    # x-only pubkey (32 bytes = 64 hex chars) — used ONLY inside the signing message
+    pubkey_xonly_hex = pubkey_full_hex[2:]  # drop 02/03 prefix
 
-    msg_bytes = attestation_signing_bytes(pubkey_hex, escrow_id, outcome, decided_at)
+    msg_bytes = attestation_signing_bytes(pubkey_xonly_hex, escrow_id, outcome, decided_at)
 
-    # BIP-340 Schnorr signature (64 bytes)
+    # BIP-340 Schnorr signature (64 bytes) — schnorr_sign returns bytes directly
     sig = privkey.schnorr_sign(msg_bytes, None, raw=True)
-    sig_hex = sig.serialize().hex()
+    sig_hex = sig.hex()
 
     return {
-        "pubkey": pubkey_hex,
+        "pubkey": pubkey_full_hex,
         "signature": sig_hex,
         "content": {
             "escrow_id": escrow_id,

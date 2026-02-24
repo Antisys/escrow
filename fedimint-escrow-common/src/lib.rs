@@ -35,6 +35,9 @@ pub enum EscrowConsensusItem {
         escrow_id: String,
         attestation: SignedAttestation,
     },
+    /// Current Bitcoin block count as seen by this guardian.
+    /// Stored in BlockHeightKey so process_input can enforce timelocks.
+    BlockHeight(u64),
 }
 
 impl std::fmt::Display for EscrowConsensusItem {
@@ -42,6 +45,9 @@ impl std::fmt::Display for EscrowConsensusItem {
         match self {
             EscrowConsensusItem::OracleAttestation { escrow_id, .. } => {
                 write!(f, "OracleAttestation(escrow_id={escrow_id})")
+            }
+            EscrowConsensusItem::BlockHeight(h) => {
+                write!(f, "BlockHeight({h})")
             }
         }
     }

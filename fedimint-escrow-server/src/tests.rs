@@ -21,7 +21,7 @@ use fedimint_escrow_common::config::{EscrowConfig, EscrowConfigConsensus, Escrow
 
 /// Build a test Escrow module instance
 fn test_escrow() -> Escrow {
-    Escrow::new(EscrowConfig {
+    Escrow::new_for_testing(EscrowConfig {
         private: EscrowConfigPrivate,
         consensus: EscrowConfigConsensus {
             deposit_fee: Amount::ZERO,
@@ -806,6 +806,151 @@ async fn test_oracle_duplicate_pubkey_counts_once() {
             fedimint_escrow_common::EscrowInputError::OracleThresholdNotMet
         ),
         "Expected OracleThresholdNotMet"
+    );
+}
+
+// ─── Security tests ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_double_spend_rejected() {
+    // Claim an escrow successfully, then try to claim it again — must fail
+    let escrow = test_escrow();
+    let (db, _buyer_kp, seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "double-spend",
+        Amount::from_sats(5_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let secret = "secret123";
+    let msg = [99u8; 32];
+    let sig = sign(&seller_kp, &msg);
+
+    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "double-spend".to_string(),
+        secret_code: secret.to_string(),
+        hashed_message: msg,
+        signature: sig.clone(),
+    });
+
+    // First claim: should succeed
+    let mut dbtx = db.begin_transaction().await;
+    let result1 = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+    assert!(result1.is_ok(), "First claim should succeed: {:?}", result1.err());
+
+    // Second claim: must be rejected — escrow is no longer Open
+    let input2 = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "double-spend".to_string(),
+        secret_code: secret.to_string(),
+        hashed_message: msg,
+        signature: sig,
+    });
+    let mut dbtx2 = db.begin_transaction().await;
+    let result2 = escrow
+        .process_input(&mut dbtx2.to_ref_nc(), &input2, dummy_in_point())
+        .await;
+    dbtx2.commit_tx().await;
+    assert!(result2.is_err(), "Double-spend must be rejected");
+    assert!(
+        matches!(
+            result2.unwrap_err(),
+            fedimint_escrow_common::EscrowInputError::InvalidStateForClaimingEscrow
+        ),
+        "Expected InvalidStateForClaimingEscrow on second claim"
+    );
+}
+
+#[tokio::test]
+async fn test_forged_signature_rejected() {
+    // Valid seller key in the input, but the signature bytes are all-zeros (forged)
+    let escrow = test_escrow();
+    let (db, _buyer_kp, seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "forged-sig",
+        Amount::from_sats(5_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let msg = [77u8; 32];
+    // Build a valid-looking Schnorr signature over a *different* message, so the
+    // bytes are a real signature but not over the claimed hashed_message.
+    let secp = Secp256k1::new();
+    let different_msg = [88u8; 32];
+    let wrong_sig = secp.sign_schnorr(
+        &secp256k1::Message::from_digest_slice(&different_msg).unwrap(),
+        &seller_kp,
+    );
+
+    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "forged-sig".to_string(),
+        secret_code: "secret123".to_string(),
+        hashed_message: msg,      // claimed message
+        signature: wrong_sig,     // signed over different_msg ≠ msg
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_err(), "Forged signature must be rejected");
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            fedimint_escrow_common::EscrowInputError::InvalidSeller
+        ),
+        "Expected InvalidSeller for forged signature"
+    );
+}
+
+#[tokio::test]
+async fn test_wrong_secret_code_rejected() {
+    // Correct seller key + valid sig, but wrong secret code → InvalidSecretCode
+    let escrow = test_escrow();
+    let (db, _buyer_kp, seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "wrong-secret",
+        Amount::from_sats(5_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let msg = [55u8; 32];
+    let sig = sign(&seller_kp, &msg);
+
+    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "wrong-secret".to_string(),
+        secret_code: "WRONG_CODE".to_string(), // correct is "secret123"
+        hashed_message: msg,
+        signature: sig,
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_err(), "Wrong secret code must be rejected");
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            fedimint_escrow_common::EscrowInputError::InvalidSecretCode
+        ),
+        "Expected InvalidSecretCode"
     );
 }
 
