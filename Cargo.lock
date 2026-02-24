@@ -3102,6 +3102,7 @@ dependencies = [
  "fedimint-escrow-common",
  "fedimint-escrow-server",
  "futures",
+ "hex",
  "rand 0.8.5",
  "random-string",
  "rust_decimal",
@@ -11458,9 +11459,9 @@ checksum = "3528ecfd12c466c6f163363caf2d02a71161dd5e1cc6ae7b34207ea2d42d81ed"
 
 [[package]]
 name = "typed-index-collections"
-version = "3.5.0"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "898160f1dfd383b4e92e17f0512a7d62f3c51c44937b23b6ffc3a1614a8eaccd"
+checksum = "3fd393dbd1e7b23e0cab7396570309b4068aa504e9dac2cd41d827583b4e9ab7"
 dependencies = [
  "bincode 2.0.1",
  "serde",
