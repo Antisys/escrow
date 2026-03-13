@@ -3,7 +3,7 @@ name = "fedimint-escrow-client"
 version = "0.3.0"
 authors = ["The Fedimint Developers"]
 edition = "2021"
-description = "fedimint-escrow is a escrow example fedimint module."
+description = "Client-side logic for the Fedimint escrow module"
 license = "MIT"
 
 [lib]
@@ -17,6 +17,9 @@ fedimint-escrow-common ={ path = "../fedimint-escrow-common" }
 fedimint-escrow-server = { path = "../fedimint-escrow-server" }
 fedimint-client = { workspace = true }
 fedimint-client-module = { workspace = true }
+fedimint-ln-client = { workspace = true }
+fedimint-ln-common = { workspace = true }
+lightning-invoice = { workspace = true }
 fedimint-api-client = { workspace = true }
 fedimint-core ={ workspace = true }
 futures = { workspace = true }
@@ -35,10 +38,11 @@ serde_json = "1.0.120"
 rust_decimal = "1.35"
 random-string = "1.1.0"
 async-stream = "0.3.5"
+tokio = { workspace = true }
 clap = { version = "4.5.8", features = ["derive"] }
 
 [build-dependencies]
-fedimint-build = { git = "https://github.com/fedimint/fedimint" }
+fedimint-build = { path = "../../fedimint/fedimint-build" }
 
 [features]
 default =[]

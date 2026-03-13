@@ -3,7 +3,7 @@ name = "fedimint-escrow-server"
 version = "0.3.0"
 authors = ["The Fedimint Developers"]
 edition = "2021"
-description = "fedimint-escrow is a escrow example fedimint module."
+description = "Guardian-side consensus logic for the Fedimint escrow module"
 license = "MIT"
 
 [package.metadata.docs.rs]

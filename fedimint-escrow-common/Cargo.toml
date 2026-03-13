@@ -3,7 +3,7 @@ name = "fedimint-escrow-common"
 version = "0.3.0"
 authors = ["The Fedimint Developers"]
 edition = "2021"
-description = "fedimint-escrow is a escrow example fedimint module."
+description = "Shared types and error definitions for the Fedimint escrow module"
 license = "MIT"
 
 [package.metadata.docs.rs]

@@ -89,19 +89,26 @@ ok "Seller balance: ${SELLER_BALANCE_BEFORE} msat"
 
 # ── Step 4: Buyer creates escrow ───────────────────────────────────────────────
 info "Step 4: Buyer creates escrow (${ESCROW_AMOUNT} msat)"
+
+# Non-custodial design: buyer generates secret locally; only the SHA-256 hash
+# is passed to the federation. The plaintext is used later to claim.
+SECRET_CODE=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+SECRET_CODE_HASH=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$SECRET_CODE")
+ok "Secret code (local): ${SECRET_CODE:0:10}... (${#SECRET_CODE} chars)"
+ok "Secret code hash:    ${SECRET_CODE_HASH:0:16}..."
+
 CREATE_JSON=$(buyer module escrow create \
   "$SELLER_PUBKEY" \
   "$ORACLE1" "$ORACLE2" "$ORACLE3" \
-  "$ESCROW_AMOUNT" "$TIMEOUT_BLOCK" 2>&1)
+  "$ESCROW_AMOUNT" "$TIMEOUT_BLOCK" \
+  --secret-code-hash "$SECRET_CODE_HASH" 2>&1)
 
 echo "    Raw output: $CREATE_JSON"
 
 ESCROW_ID=$(echo "$CREATE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['escrow-id'])")
-SECRET_CODE=$(echo "$CREATE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['secret-code'])")
 STATE_MSG=$(echo "$CREATE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['state'])")
 
 ok "Escrow ID: $ESCROW_ID"
-ok "Secret code: ${SECRET_CODE:0:10}... (${#SECRET_CODE} chars)"
 ok "State: $STATE_MSG"
 
 # ── Step 5: Verify escrow is Open ─────────────────────────────────────────────

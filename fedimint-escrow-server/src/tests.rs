@@ -7,9 +7,10 @@ use fedimint_escrow_common::oracle::{
     attestation_signing_bytes, Beneficiary, OracleAttestationContent, SignedAttestation,
 };
 use fedimint_escrow_common::{
-    EscrowInput, EscrowInputClamingWithoutDispute, EscrowInputDisputing,
-    EscrowInputOracleAttestation, EscrowInputTimeoutClaim, EscrowOutput, EscrowOutputError,
-    EscrowStates, TimeoutAction, hash256,
+    EscrowInput, EscrowInputClamingWithoutDispute, EscrowInputClaimDelegated,
+    EscrowInputDisputing, EscrowInputDisputeDelegated,
+    EscrowInputOracleAttestation, EscrowInputTimeoutClaim, EscrowInputTimeoutClaimDelegated,
+    EscrowOutput, EscrowOutputError, EscrowStates, TimeoutAction, hash256,
 };
 use fedimint_server_core::ServerModule;
 use secp256k1::rand::rngs::OsRng;
@@ -18,6 +19,17 @@ use secp256k1::{Keypair, Message, Secp256k1};
 use crate::db::{BlockHeightKey, EscrowKey};
 use crate::{Escrow, EscrowValue};
 use fedimint_escrow_common::config::{EscrowConfig, EscrowConfigConsensus, EscrowConfigPrivate};
+use sha2::{Sha256, Digest};
+
+/// Compute SHA256 of a string as [u8; 32] (for hashed_message fields)
+fn sha256_bytes(input: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let result = hasher.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&result);
+    bytes
+}
 
 /// Build a test Escrow module instance
 fn test_escrow() -> Escrow {
@@ -989,5 +1001,347 @@ async fn test_oracle_non_disputed_state_rejected() {
             fedimint_escrow_common::EscrowInputError::InvalidStateForClaimingEscrow
         ),
         "Expected InvalidStateForClaimingEscrow"
+    );
+}
+
+// ─── Delegated claim tests ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_claim_delegated_buyer_signs() {
+    // ClaimDelegated: buyer signs SHA256(secret_code), service submits, e-cash goes to service
+    let escrow = test_escrow();
+    let (db, buyer_kp, _seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-claim",
+        Amount::from_sats(5_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let secret = "secret123";
+    let secret_hash = sha256_bytes(secret);
+    let sig = sign(&buyer_kp, &secret_hash);
+
+    // Service's key (different from buyer/seller)
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::ClaimDelegated(EscrowInputClaimDelegated {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "delegated-claim".to_string(),
+        secret_code: secret.to_string(),
+        hashed_message: secret_hash,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_ok(), "Delegated claim should succeed: {:?}", result.err());
+    let meta = result.unwrap();
+    // E-cash goes to SERVICE, not buyer
+    assert_eq!(meta.pub_key, service_kp.public_key(), "E-cash must go to submitter (service)");
+    assert_eq!(meta.amount.amounts, Amounts::new_bitcoin(Amount::from_sats(5_000)));
+}
+
+#[tokio::test]
+async fn test_claim_delegated_wrong_signer_rejected() {
+    // ClaimDelegated signed by seller (not buyer) → must fail
+    let escrow = test_escrow();
+    let (db, _buyer_kp, seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-wrong-signer",
+        Amount::from_sats(5_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let secret = "secret123";
+    let secret_hash = sha256_bytes(secret);
+    let sig = sign(&seller_kp, &secret_hash); // WRONG: seller signs, but buyer_pubkey is checked
+
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::ClaimDelegated(EscrowInputClaimDelegated {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "delegated-wrong-signer".to_string(),
+        secret_code: secret.to_string(),
+        hashed_message: secret_hash,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_err(), "Seller signing ClaimDelegated must fail");
+    assert!(
+        matches!(result.unwrap_err(), fedimint_escrow_common::EscrowInputError::InvalidBuyer),
+        "Expected InvalidBuyer"
+    );
+}
+
+#[tokio::test]
+async fn test_claim_delegated_wrong_secret_rejected() {
+    let escrow = test_escrow();
+    let (db, buyer_kp, _seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-wrong-secret",
+        Amount::from_sats(5_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let wrong_secret = "WRONG_CODE";
+    let hash = sha256_bytes(wrong_secret);
+    let sig = sign(&buyer_kp, &hash);
+
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::ClaimDelegated(EscrowInputClaimDelegated {
+        amount: Amount::from_sats(5_000),
+        escrow_id: "delegated-wrong-secret".to_string(),
+        secret_code: wrong_secret.to_string(),
+        hashed_message: hash,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_err(), "Wrong secret code must be rejected");
+    assert!(
+        matches!(result.unwrap_err(), fedimint_escrow_common::EscrowInputError::InvalidSecretCode),
+        "Expected InvalidSecretCode"
+    );
+}
+
+// ─── Delegated timeout claim tests ────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_timeout_claim_delegated_refund_buyer_signs() {
+    let escrow = test_escrow();
+    let (db, buyer_kp, _seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-timeout-refund",
+        Amount::from_sats(10_000),
+        1000,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    // SHA256("timeout") — the canonical message for timeout authorization
+    let timeout_msg = sha256_bytes("timeout");
+    let sig = sign(&buyer_kp, &timeout_msg);
+
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::TimeoutClaimDelegated(EscrowInputTimeoutClaimDelegated {
+        amount: Amount::from_sats(10_000),
+        escrow_id: "delegated-timeout-refund".to_string(),
+        hashed_message: timeout_msg,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    dbtx.insert_entry(&BlockHeightKey, &1500u64).await;
+
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_ok(), "Delegated timeout (refund, buyer signs) should succeed: {:?}", result.err());
+    let meta = result.unwrap();
+    // E-cash to service, not buyer
+    assert_eq!(meta.pub_key, service_kp.public_key(), "E-cash must go to submitter");
+}
+
+#[tokio::test]
+async fn test_timeout_claim_delegated_release_seller_signs() {
+    let escrow = test_escrow();
+    let (db, _buyer_kp, seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-timeout-release",
+        Amount::from_sats(10_000),
+        1000,
+        TimeoutAction::Release,
+    )
+    .await;
+
+    let timeout_msg = sha256_bytes("timeout");
+    let sig = sign(&seller_kp, &timeout_msg);
+
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::TimeoutClaimDelegated(EscrowInputTimeoutClaimDelegated {
+        amount: Amount::from_sats(10_000),
+        escrow_id: "delegated-timeout-release".to_string(),
+        hashed_message: timeout_msg,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    dbtx.insert_entry(&BlockHeightKey, &1500u64).await;
+
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_ok(), "Delegated timeout (release, seller signs) should succeed: {:?}", result.err());
+    let meta = result.unwrap();
+    assert_eq!(meta.pub_key, service_kp.public_key());
+}
+
+#[tokio::test]
+async fn test_timeout_claim_delegated_wrong_signer_rejected() {
+    // Refund timeout: buyer should sign, but seller signs → rejected
+    let escrow = test_escrow();
+    let (db, _buyer_kp, seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-timeout-wrong-signer",
+        Amount::from_sats(10_000),
+        1000,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let timeout_msg = sha256_bytes("timeout");
+    let sig = sign(&seller_kp, &timeout_msg); // WRONG: seller signs for refund action
+
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::TimeoutClaimDelegated(EscrowInputTimeoutClaimDelegated {
+        amount: Amount::from_sats(10_000),
+        escrow_id: "delegated-timeout-wrong-signer".to_string(),
+        hashed_message: timeout_msg,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    dbtx.insert_entry(&BlockHeightKey, &1500u64).await;
+
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_err(), "Wrong signer for delegated timeout must fail");
+    assert!(
+        matches!(result.unwrap_err(), fedimint_escrow_common::EscrowInputError::InvalidBuyer),
+        "Expected InvalidBuyer"
+    );
+}
+
+// ─── Delegated dispute tests ──────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_dispute_delegated_buyer() {
+    let escrow = test_escrow();
+    let (db, buyer_kp, _seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-dispute-buyer",
+        Amount::from_sats(10_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let dispute_msg = sha256_bytes("dispute");
+    let sig = sign(&buyer_kp, &dispute_msg);
+
+    let secp = Secp256k1::new();
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let input = EscrowInput::DisputeDelegated(EscrowInputDisputeDelegated {
+        escrow_id: "delegated-dispute-buyer".to_string(),
+        disputer: buyer_kp.public_key(),
+        hashed_message: dispute_msg,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_ok(), "Delegated dispute by buyer should succeed: {:?}", result.err());
+    let meta = result.unwrap();
+    assert_eq!(meta.pub_key, service_kp.public_key(), "E-cash token goes to submitter");
+    // Dispute is zero-amount state change
+    assert_eq!(meta.amount.amounts, Amounts::ZERO);
+
+    // Verify state changed to DisputedByBuyer
+    let mut dbtx2 = db.begin_transaction().await;
+    let value: EscrowValue = dbtx2
+        .get_value(&EscrowKey { escrow_id: "delegated-dispute-buyer".to_string() })
+        .await
+        .unwrap();
+    assert_eq!(value.state, EscrowStates::DisputedByBuyer);
+}
+
+#[tokio::test]
+async fn test_dispute_delegated_unauthorized_key_rejected() {
+    // A third-party key (not buyer or seller) tries to dispute → rejected
+    let escrow = test_escrow();
+    let (db, _buyer_kp, _seller_kp, _oracle_kps) = setup_escrow_for_input(
+        &escrow,
+        "delegated-dispute-unauthorized",
+        Amount::from_sats(10_000),
+        9999,
+        TimeoutAction::Refund,
+    )
+    .await;
+
+    let secp = Secp256k1::new();
+    let random_kp = Keypair::new(&secp, &mut OsRng);
+    let service_kp = Keypair::new(&secp, &mut OsRng);
+
+    let dispute_msg = sha256_bytes("dispute");
+    let sig = sign(&random_kp, &dispute_msg);
+
+    let input = EscrowInput::DisputeDelegated(EscrowInputDisputeDelegated {
+        escrow_id: "delegated-dispute-unauthorized".to_string(),
+        disputer: random_kp.public_key(),
+        hashed_message: dispute_msg,
+        external_signature: sig,
+        submitter_pubkey: service_kp.public_key(),
+    });
+
+    let mut dbtx = db.begin_transaction().await;
+    let result = escrow
+        .process_input(&mut dbtx.to_ref_nc(), &input, dummy_in_point())
+        .await;
+    dbtx.commit_tx().await;
+
+    assert!(result.is_err(), "Unauthorized key disputing must fail");
+    assert!(
+        matches!(result.unwrap_err(), fedimint_escrow_common::EscrowInputError::UnauthorizedToDispute),
+        "Expected UnauthorizedToDispute"
     );
 }

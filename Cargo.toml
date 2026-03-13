@@ -5,6 +5,7 @@ members = [
     "fedimint-escrow-common",
     "fedimint-escrow-client",
     "fedimint-escrow-server",
+    "escrow-httpd",
     "tests",
 ]
 resolver = "2"
@@ -27,10 +28,13 @@ fedimint-server-core = { path = "../fedimint/fedimint-server-core" }
 fedimint-client-module = { path = "../fedimint/fedimint-client-module" }
 fedimint-api-client = { path = "../fedimint/fedimint-api-client" }
 fedimint-testing = { path = "../fedimint/fedimint-testing" }
+fedimint-ln-client = { path = "../fedimint/modules/fedimint-ln-client" }
+fedimint-ln-common = { path = "../fedimint/modules/fedimint-ln-common" }
+lightning-invoice = { version = "0.33.2", features = ["std", "serde"] }
 devimint = { path = "../fedimint/devimint" }
 aead = { path = "../fedimint/crypto/aead" }
 tbs = { path = "../fedimint/crypto/tbs" }
-threshold_crypto = { git = "https://github.com/fedimint/threshold_crypto" }
+threshold_crypto = { version = "0.2.1", package = "fedimint-threshold-crypto" }
 async-trait = "0.1.73"
 bitcoin = { version = "0.32.6", features = ["rand-std"] }
 secp256k1 = { version = "0.29.0", features = ["rand", "serde", "rand-std"] }
@@ -44,6 +48,7 @@ serde = { version = "1.0.149", features = ["derive"] }
 erased-serde = "0.4"
 tracing = "0.1.37"
 sha2 = "0.10.8"
+tokio = { version = "1", features = ["time"] }
 
 [profile.dev]
 split-debuginfo = "packed"

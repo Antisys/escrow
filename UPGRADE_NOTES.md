@@ -170,6 +170,47 @@ clap = { version = "4.5.8", features = ["derive"] }
 
 ---
 
+## Build Notes
+
+### Always build the custom fedimintd with `-p fedimintd-custom`
+
+```bash
+cargo build -p fedimintd-custom
+```
+
+**Do NOT use `-p fedimintd`** — that builds the upstream Fedimint daemon (without the
+escrow module) and overwrites `target/debug/fedimintd` with a binary that returns
+`"No module with this kind found"` for all escrow commands. This is a silent failure
+that is hard to diagnose.
+
+The workspace has two packages that produce a `fedimintd` binary:
+- `fedimintd-custom` (path: `fedimintd/`) — our custom daemon with `EscrowInit` attached ✅
+- `fedimintd` (workspace dep: `../fedimint/fedimintd`) — upstream, no escrow ❌
+
+### Running E2E tests
+
+```bash
+# All three tests in one devimint session:
+bash scripts/dev/run-all-e2e.sh
+
+# Individual tests (require devimint already running):
+bash scripts/dev/e2e-happy-path.sh
+bash scripts/dev/e2e-timeout-path.sh
+bash scripts/dev/e2e-dispute-flow.sh
+```
+
+### Fedimint mint fees
+
+Fedimint charges ecash mint fees on both the lock and unlock side. At devimint
+defaults, expect approximately:
+- Happy path: buyer −10624 msat, seller +7422 msat (on 10000 msat escrow)
+- Dispute (oracle): buyer −10496 msat, seller +9472 msat
+- Timeout refund: buyer delta −1760 msat (most of the escrow returned)
+
+This is expected behavior — not a bug.
+
+---
+
 ## Known Issues
 
 - `fedimint-ldk-node` in the upstream checkout has an `electrum_client` version

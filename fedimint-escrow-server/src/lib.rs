@@ -414,18 +414,14 @@ impl ServerModule for Escrow {
                 };
                 dbtx.insert_entry(&escrow_key, &escrow_value).await;
 
-                // Winner gets the ecash
-                let winner_pubkey = match beneficiary {
-                    Beneficiary::Buyer => escrow_value.buyer_pubkey,
-                    Beneficiary::Seller => escrow_value.seller_pubkey,
-                };
-
+                // Submitter (service) gets the e-cash for LN payout to winner.
+                // Authorization is provided by the oracle attestations, not the tx signer.
                 Ok(InputMeta {
                     amount: TransactionItemAmounts {
                         amounts: Amounts::new_bitcoin(escrow_input.amount),
                         fees: Amounts::ZERO,
                     },
-                    pub_key: winner_pubkey,
+                    pub_key: escrow_input.submitter_pubkey,
                 })
             }
             EscrowInput::TimeoutClaim(escrow_input) => {
@@ -486,6 +482,153 @@ impl ServerModule for Escrow {
                     pub_key: authorized_pubkey,
                 })
             }
+            // --- Delegated variants: user signs externally, service submits ---
+            // E-cash goes to submitter_pubkey (service) for LN payout.
+            EscrowInput::ClaimDelegated(input) => {
+                let mut escrow_value = self
+                    .get_escrow_value(dbtx, input.escrow_id.clone())
+                    .await?;
+
+                if escrow_value.state != EscrowStates::Open {
+                    return Err(EscrowInputError::InvalidStateForClaimingEscrow);
+                }
+
+                // Verify secret code hash
+                if escrow_value.secret_code_hash != hash256(input.secret_code.clone()) {
+                    return Err(EscrowInputError::InvalidSecretCode);
+                }
+
+                // Verify buyer's external Schnorr signature (buyer holds secret + key)
+                let secp = Secp256k1::new();
+                let message = Message::from_digest_slice(&input.hashed_message).expect("32 bytes");
+                let (xonly_pubkey, _parity) = escrow_value.buyer_pubkey.x_only_public_key();
+                if secp
+                    .verify_schnorr(&input.external_signature, &message, &xonly_pubkey)
+                    .is_err()
+                {
+                    return Err(EscrowInputError::InvalidBuyer);
+                }
+
+                escrow_value.state = EscrowStates::ResolvedWithoutDispute;
+
+                let escrow_key = EscrowKey {
+                    escrow_id: input.escrow_id.clone(),
+                };
+                dbtx.insert_entry(&escrow_key, &escrow_value).await;
+
+                Ok(InputMeta {
+                    amount: TransactionItemAmounts {
+                        amounts: Amounts::new_bitcoin(input.amount),
+                        fees: Amounts::ZERO,
+                    },
+                    pub_key: input.submitter_pubkey,
+                })
+            }
+            EscrowInput::TimeoutClaimDelegated(input) => {
+                let mut escrow_value = self
+                    .get_escrow_value(dbtx, input.escrow_id.clone())
+                    .await?;
+
+                // Only open or disputed escrows can be claimed via timeout
+                match escrow_value.state {
+                    EscrowStates::Open
+                    | EscrowStates::DisputedByBuyer
+                    | EscrowStates::DisputedBySeller => {}
+                    _ => return Err(EscrowInputError::InvalidStateForClaimingEscrow),
+                }
+
+                // Check that the timelock has expired
+                let current_height = dbtx
+                    .get_value(&BlockHeightKey)
+                    .await
+                    .ok_or(EscrowInputError::BlockHeightUnknown)?;
+                if current_height < escrow_value.timeout_block as u64 {
+                    return Err(EscrowInputError::TimelockNotExpired {
+                        current: current_height,
+                        required: escrow_value.timeout_block as u64,
+                    });
+                }
+
+                // Determine authorized party from timeout_action
+                let (authorized_pubkey, auth_error) = match escrow_value.timeout_action {
+                    TimeoutAction::Release => (escrow_value.seller_pubkey, EscrowInputError::InvalidSeller),
+                    TimeoutAction::Refund => (escrow_value.buyer_pubkey, EscrowInputError::InvalidBuyer),
+                };
+
+                // Verify external signature from authorized party
+                let secp = Secp256k1::new();
+                let message = Message::from_digest_slice(&input.hashed_message).expect("32 bytes");
+                let (xonly_pubkey, _parity) = authorized_pubkey.x_only_public_key();
+                if secp
+                    .verify_schnorr(&input.external_signature, &message, &xonly_pubkey)
+                    .is_err()
+                {
+                    return Err(auth_error);
+                }
+
+                escrow_value.state = EscrowStates::TimedOut;
+
+                let escrow_key = EscrowKey {
+                    escrow_id: input.escrow_id.clone(),
+                };
+                dbtx.insert_entry(&escrow_key, &escrow_value).await;
+
+                Ok(InputMeta {
+                    amount: TransactionItemAmounts {
+                        amounts: Amounts::new_bitcoin(input.amount),
+                        fees: Amounts::ZERO,
+                    },
+                    pub_key: input.submitter_pubkey,
+                })
+            }
+            EscrowInput::DisputeDelegated(input) => {
+                let mut escrow_value = self
+                    .get_escrow_value(dbtx, input.escrow_id.clone())
+                    .await?;
+
+                // Determine who is disputing
+                let disputer = if input.disputer == escrow_value.buyer_pubkey {
+                    Disputer::Buyer
+                } else if input.disputer == escrow_value.seller_pubkey {
+                    Disputer::Seller
+                } else {
+                    return Err(EscrowInputError::UnauthorizedToDispute);
+                };
+
+                // Verify external signature from disputer
+                let secp = Secp256k1::new();
+                let message = Message::from_digest_slice(&input.hashed_message).expect("32 bytes");
+                let (xonly_pubkey, _parity) = input.disputer.x_only_public_key();
+                if secp
+                    .verify_schnorr(&input.external_signature, &message, &xonly_pubkey)
+                    .is_err()
+                {
+                    return Err(EscrowInputError::InvalidOracleSignature);
+                }
+
+                match escrow_value.state {
+                    EscrowStates::Open => {
+                        escrow_value.state = match disputer {
+                            Disputer::Buyer => EscrowStates::DisputedByBuyer,
+                            Disputer::Seller => EscrowStates::DisputedBySeller,
+                        };
+                    }
+                    _ => return Err(EscrowInputError::InvalidStateForInitiatingDispute),
+                }
+
+                let escrow_key = EscrowKey {
+                    escrow_id: input.escrow_id.clone(),
+                };
+                dbtx.insert_entry(&escrow_key, &escrow_value).await;
+
+                Ok(InputMeta {
+                    amount: TransactionItemAmounts {
+                        amounts: Amounts::ZERO,
+                        fees: Amounts::ZERO,
+                    },
+                    pub_key: input.submitter_pubkey,
+                })
+            }
         }
     }
 
@@ -507,7 +650,7 @@ impl ServerModule for Escrow {
         };
         // Validate exactly 3 oracle pubkeys
         if output.oracle_pubkeys.len() != 3 {
-            return Err(EscrowOutputError::EscrowAlreadyExists); // reuse error for now
+            return Err(EscrowOutputError::InvalidOraclePubkeyCount);
         }
 
         let escrow_value = EscrowValue {

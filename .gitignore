@@ -1,7 +1,11 @@
 /target
+/target-nix
 /result
 .idea
 .tmpenv
 .direnv
 .vscode
 __pycache__/
+backend/
+docs/
+deploy/

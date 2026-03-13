@@ -99,6 +99,12 @@ pub enum EscrowInput {
     OracleAttestation(EscrowInputOracleAttestation),
     /// The input when the authorized party claims after the timelock has expired
     TimeoutClaim(EscrowInputTimeoutClaim),
+    /// Delegated claim: service submits, user's external signature authorizes (non-custodial)
+    ClaimDelegated(EscrowInputClaimDelegated),
+    /// Delegated timeout claim: service submits with user's pre-signed authorization
+    TimeoutClaimDelegated(EscrowInputTimeoutClaimDelegated),
+    /// Delegated dispute: service submits, user's signature proves identity
+    DisputeDelegated(EscrowInputDisputeDelegated),
 }
 /// The input for the escrow module when the seller is claiming the escrow using
 /// the secret code
@@ -130,13 +136,57 @@ pub struct EscrowInputTimeoutClaim {
     pub signature: Signature,
 }
 
-/// The input for 2-of-3 oracle-attestation dispute resolution
+/// The input for 2-of-3 oracle-attestation dispute resolution.
+/// The submitter_pubkey (service) gets the e-cash via InputMeta for LN payout.
+/// Authorization comes from the oracle attestations, not the transaction signer.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EscrowInputOracleAttestation {
     pub amount: Amount,
     pub escrow_id: String,
     /// At least 2 valid, agreeing attestations from registered oracle pubkeys
     pub attestations: Vec<SignedAttestation>,
+    /// The service's pubkey — receives e-cash for LN payout to winner
+    pub submitter_pubkey: PublicKey,
+}
+
+/// Delegated claim: buyer proves consent (has secret + signs with their key).
+/// The submitter_pubkey (service) gets the e-cash via InputMeta for LN payout.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
+pub struct EscrowInputClaimDelegated {
+    pub amount: Amount,
+    pub escrow_id: String,
+    pub secret_code: String,
+    pub hashed_message: [u8; 32],
+    /// Schnorr signature from buyer's ephemeral key over hashed_message
+    pub external_signature: Signature,
+    /// Service's pubkey — receives e-cash via InputMeta (framework auth)
+    pub submitter_pubkey: PublicKey,
+}
+
+/// Delegated timeout claim: pre-signed by the authorized party (buyer for
+/// refund, seller for release). Service submits with stored signature.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
+pub struct EscrowInputTimeoutClaimDelegated {
+    pub amount: Amount,
+    pub escrow_id: String,
+    pub hashed_message: [u8; 32],
+    /// Schnorr signature from the authorized party's ephemeral key
+    pub external_signature: Signature,
+    /// Service's pubkey — receives e-cash via InputMeta (framework auth)
+    pub submitter_pubkey: PublicKey,
+}
+
+/// Delegated dispute: user signs to prove identity, service submits.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
+pub struct EscrowInputDisputeDelegated {
+    pub escrow_id: String,
+    /// The actual disputer's pubkey (must match buyer or seller in escrow)
+    pub disputer: PublicKey,
+    pub hashed_message: [u8; 32],
+    /// Schnorr signature from the disputer's ephemeral key
+    pub external_signature: Signature,
+    /// Service's pubkey — for framework auth (zero-amount state change)
+    pub submitter_pubkey: PublicKey,
 }
 
 /// The output for the escrow module
@@ -197,6 +247,8 @@ pub enum EscrowInputError {
 pub enum EscrowOutputError {
     #[error("Escrow already exists")]
     EscrowAlreadyExists,
+    #[error("Invalid oracle pubkey count (expected 3)")]
+    InvalidOraclePubkeyCount,
 }
 
 /// The errors for the escrow module in client side
@@ -275,8 +327,8 @@ impl fmt::Display for EscrowInput {
         match self {
             EscrowInput::ClamingWithoutDispute(input) => write!(
                 f,
-                "EscrowInput::ClamingWithoutDispute {{ amount: {}, secret_code: {} }}",
-                input.amount, input.secret_code
+                "EscrowInput::ClamingWithoutDispute {{ amount: {}, escrow_id: {} }}",
+                input.amount, input.escrow_id
             ),
             EscrowInput::Disputing(input) => write!(
                 f,
@@ -293,6 +345,21 @@ impl fmt::Display for EscrowInput {
                 f,
                 "EscrowInput::TimeoutClaim {{ amount: {}, escrow_id: {} }}",
                 input.amount, input.escrow_id
+            ),
+            EscrowInput::ClaimDelegated(input) => write!(
+                f,
+                "EscrowInput::ClaimDelegated {{ amount: {}, escrow_id: {} }}",
+                input.amount, input.escrow_id
+            ),
+            EscrowInput::TimeoutClaimDelegated(input) => write!(
+                f,
+                "EscrowInput::TimeoutClaimDelegated {{ amount: {}, escrow_id: {} }}",
+                input.amount, input.escrow_id
+            ),
+            EscrowInput::DisputeDelegated(input) => write!(
+                f,
+                "EscrowInput::DisputeDelegated {{ escrow_id: {}, disputer: {:?} }}",
+                input.escrow_id, input.disputer
             ),
         }
     }

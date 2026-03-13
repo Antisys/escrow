@@ -85,10 +85,15 @@ ok "Buyer balance: ${BUYER_BALANCE_BEFORE} msat"
 
 # ── Step 4: Buyer creates escrow with near-future timeout ──────────────────────
 info "Step 4: Buyer creates escrow (timeout_block=${TIMEOUT_BLOCK}, action=refund)"
+# Non-custodial: generate secret locally; only hash goes to federation.
+# Timeout path doesn't need the secret code (claim-timeout is used), but create requires a hash.
+_SC=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+_SC_HASH=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$_SC")
 CREATE_JSON=$(buyer module escrow create \
   "$SELLER_PUBKEY" \
   "$ORACLE1" "$ORACLE2" "$ORACLE3" \
-  "$ESCROW_AMOUNT" "$TIMEOUT_BLOCK" refund 2>&1)
+  "$ESCROW_AMOUNT" "$TIMEOUT_BLOCK" refund \
+  --secret-code-hash "$_SC_HASH" 2>&1)
 
 echo "    Raw output: $CREATE_JSON"
 ESCROW_ID=$(echo "$CREATE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['escrow-id'])")

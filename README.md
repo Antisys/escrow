@@ -1,10 +1,8 @@
-# Escrow Module
+# Fedimint Escrow Module
 
 A Fedimint custom module for trustless escrow between buyer and seller, with 2-of-3 Nostr oracle dispute resolution.
 
-Based on [fedimint-custom-module-template](https://github.com/fedimint/fedimint-custom-modules-example).
-
-**Version:** 0.3.0 (upgraded to Fedimint v0.11.0-alpha)
+Based on [fedimint-custom-modules-example](https://github.com/fedimint/fedimint-custom-modules-example).
 
 ## Overview
 
@@ -12,6 +10,17 @@ This module facilitates secure transactions between a buyer and a seller. Funds 
 - **Cooperatively**: Seller claims with the secret code shared by the buyer
 - **On timeout**: Automatically released to buyer (refund) or seller (release) per the configured timeout action
 - **Via oracle dispute**: A 2-of-3 Nostr oracle quorum votes on the outcome
+
+## Crates
+
+| Crate | Description |
+|-------|-------------|
+| `fedimint-escrow-common` | Shared types, error definitions, oracle attestation format |
+| `fedimint-escrow-server` | Guardian-side consensus logic (state machine, validation) |
+| `fedimint-escrow-client` | Client-side operations (create, claim, dispute, resolve) |
+| `fedimint-cli-custom` | Custom fedimint-cli binary with escrow module included |
+| `fedimintd-custom` | Custom fedimintd binary with escrow module included |
+| `escrow-httpd` | Persistent HTTP daemon — eliminates ~13s cold-start per CLI invocation |
 
 ## Architecture
 
@@ -27,6 +36,67 @@ Open → DisputedByBuyer / DisputedBySeller
      → ResolvedByOracle (2-of-3 oracle quorum decides)
 Open → TimedOut (block height exceeded, funds go to configured beneficiary)
 ```
+
+## Prerequisites
+
+This module builds against Fedimint v0.11.0-alpha (unreleased). You need the fedimint source tree as a sibling directory:
+
+```bash
+git clone https://github.com/fedimint/fedimint.git
+git clone <this-repo> fedimint-escrow
+# Directory layout:
+#   fedimint/
+#   fedimint-escrow/
+```
+
+## Build
+
+```bash
+# Module crates (requires system cargo >= 1.85)
+cargo check -p fedimint-escrow-common -p fedimint-escrow-server -p fedimint-escrow-client
+
+# Custom fedimintd (requires nix devshell for fedimint dependencies)
+nix develop ../fedimint --command bash -c \
+  "CARGO_TARGET_DIR=target-nix cargo build --release -p fedimintd-custom"
+
+# escrow-httpd (persistent HTTP daemon)
+nix develop ../fedimint --command bash -c \
+  "CARGO_TARGET_DIR=target-nix cargo build --release -p escrow-httpd"
+
+# Tests (17 unit tests)
+cargo test -p fedimint-escrow-server
+```
+
+## escrow-httpd
+
+Persistent HTTP daemon that keeps a Fedimint client alive and exposes REST endpoints. Eliminates the ~13s cold-start overhead of spawning `fedimint-cli` per request.
+
+### Usage
+
+```bash
+escrow-httpd --data-dir /path/to/client-data --bind 127.0.0.1:5400
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/info` | Wallet balance |
+| GET | `/escrow/public-key` | Service public key |
+| GET | `/escrow/{id}/info` | Escrow state and details |
+| GET | `/block-height` | Federation consensus block height |
+| POST | `/escrow/receive-into-escrow` | Create BOLT11 invoice + pre-register escrow |
+| POST | `/escrow/await-receive` | Poll for invoice payment |
+| POST | `/escrow/await-invoice` | Poll LN invoice status |
+| POST | `/escrow/claim-and-pay` | Claim with secret code + pay via LN |
+| POST | `/escrow/claim-timeout-and-pay` | Claim after timeout + pay via LN |
+| POST | `/escrow/claim-delegated-and-pay` | Delegated claim (user-signed) + pay via LN |
+| POST | `/escrow/claim-timeout-delegated-and-pay` | Delegated timeout claim + pay via LN |
+| POST | `/escrow/dispute-delegated` | Delegated dispute initiation |
+| POST | `/escrow/resolve-oracle` | Resolve via oracle attestations |
+| POST | `/escrow/resolve-oracle-and-pay` | Resolve via oracle + pay via LN |
+
+All fund-moving operations go through escrow authorization (secret code, oracle signatures, or timelock). There is no standalone payment endpoint.
 
 ## CLI Commands
 
@@ -74,7 +144,7 @@ fedimint-cli module escrow dispute [ESCROW_ID]
 
 Either party can raise a dispute. Transitions to `DisputedByBuyer` or `DisputedBySeller`.
 
-### 5. Oracle Attestation (via federation consensus)
+### 5. Oracle Attestation
 
 Oracles submit signed attestations off-chain. Guardians accumulate them via consensus items. Once 2-of-3 oracles agree, the winner can submit `OracleAttestation` input to claim funds.
 
@@ -99,14 +169,12 @@ Returns the client's public key for use in escrow creation.
 ## Dispute Resolution Flow
 
 ```
-graph TD
-    A[Buyer] -->|Create Escrow + 3 Oracle Pubkeys| B[Escrow OPEN]
-    B -->|Share SECRET_CODE off-band| C[Seller]
-    C -->|No Dispute: Seller Claims| D[Escrow CLAIMED]
-    B -->|Dispute raised by buyer or seller| E[Escrow DISPUTED]
-    E -->|2-of-3 oracle Schnorr sigs agree| F[ResolvedByOracle]
-    F -->|Winner claimed| G[Escrow RESOLVED]
-    B -->|Block height > timeout_block| H[TimedOut → refund or release]
+Buyer creates escrow with 3 oracle pubkeys
+  → Escrow OPEN
+  → Seller claims with secret code → CLAIMED
+  → Either party disputes → DISPUTED
+    → 2-of-3 oracle Schnorr sigs agree → RESOLVED
+  → Block height > timeout_block → TIMED_OUT (refund or release)
 ```
 
 ## Oracle Attestation Format
@@ -118,16 +186,6 @@ Oracles sign using BIP-340 Schnorr over SHA256 of:
 
 This matches the Nostr NIP-01 event signing format for kind 30001 (parametrized replaceable events).
 
-## Build
-
-```bash
-# Outside nix shell (requires system cargo ≥ 1.85)
-cargo check -p fedimint-escrow-common -p fedimint-escrow-server -p fedimint-escrow-client
-
-# Tests (17 unit tests)
-cargo test -p fedimint-escrow-server
-```
-
 ## Tests
 
 17 unit tests covering:
@@ -138,6 +196,6 @@ cargo test -p fedimint-escrow-server
 - Oracle threshold failures: single sig, conflicting outcomes, unknown pubkey, wrong escrow_id, duplicate pubkey dedup
 - Non-disputed state rejection
 
-## Upgrade Notes
+## License
 
-See [UPGRADE_NOTES.md](UPGRADE_NOTES.md) for the migration path from v0.3.0 (Fedimint v0.3.0) to v0.11.0-alpha.
+MIT — see [LICENSE](LICENSE).

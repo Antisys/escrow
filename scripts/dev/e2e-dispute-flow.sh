@@ -11,7 +11,7 @@
 #   7. Seller balance increases
 #
 # Requires: active devimint federation (target/devimint symlink → live data dir)
-#           secp256k1 Python library: source /home/ralf/ln-escrow/venv/bin/activate
+#           secp256k1 Python library (pip install secp256k1)
 # Usage: bash scripts/dev/e2e-dispute-flow.sh
 
 set -euo pipefail
@@ -19,7 +19,7 @@ set -euo pipefail
 ESCROW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FEDIMINT_CLI="$ESCROW_DIR/target/debug/fedimint-cli"
 ORACLE_SIGN="$ESCROW_DIR/tools/oracle_sign.py"
-VENV="/home/ralf/ln-escrow/venv/bin/activate"
+VENV="${PYTHON_VENV:-}"
 
 # ── Color helpers ──────────────────────────────────────────────────────────────
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -106,10 +106,15 @@ ok "Seller balance: ${SELLER_BALANCE_BEFORE} msat"
 
 # ── Step 4: Buyer creates escrow with real oracle pubkeys ──────────────────────
 info "Step 4: Buyer creates escrow (${ESCROW_AMOUNT} msat) with real oracle pubkeys"
+# Non-custodial: generate secret locally; only hash goes to federation.
+# Dispute path doesn't need the secret code (oracle resolves), but create requires a hash.
+_SC=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+_SC_HASH=$(python3 -c "import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())" "$_SC")
 CREATE_JSON=$(buyer module escrow create \
   "$SELLER_PUBKEY" \
   "$ORACLE_PUBKEY1" "$ORACLE_PUBKEY2" "$ORACLE_PUBKEY3" \
-  "$ESCROW_AMOUNT" "$TIMEOUT_BLOCK" 2>&1)
+  "$ESCROW_AMOUNT" "$TIMEOUT_BLOCK" \
+  --secret-code-hash "$_SC_HASH" 2>&1)
 
 echo "    Raw output: $CREATE_JSON"
 ESCROW_ID=$(echo "$CREATE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['escrow-id'])")
