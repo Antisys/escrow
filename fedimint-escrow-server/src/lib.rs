@@ -277,7 +277,7 @@ impl ServerModule for Escrow {
         _in_point: InPoint,
     ) -> Result<InputMeta, EscrowInputError> {
         match input {
-            EscrowInput::ClamingWithoutDispute(escrow_input) => {
+            EscrowInput::ClaimWithoutDispute(escrow_input) => {
                 let mut escrow_value = self
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;

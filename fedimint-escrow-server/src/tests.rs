@@ -7,7 +7,7 @@ use fedimint_escrow_common::oracle::{
     attestation_signing_bytes, Beneficiary, OracleAttestationContent, SignedAttestation,
 };
 use fedimint_escrow_common::{
-    EscrowInput, EscrowInputClamingWithoutDispute, EscrowInputClaimDelegated,
+    EscrowInput, EscrowInputClaimWithoutDispute, EscrowInputClaimDelegated,
     EscrowInputDisputing, EscrowInputDisputeDelegated,
     EscrowInputOracleAttestation, EscrowInputTimeoutClaim, EscrowInputTimeoutClaimDelegated,
     EscrowOutput, EscrowOutputError, EscrowStates, TimeoutAction, hash256,
@@ -527,7 +527,7 @@ async fn test_cooperative_claim_without_dispute() {
     let msg = [42u8; 32];
     let sig = sign(&seller_kp, &msg);
 
-    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+    let input = EscrowInput::ClaimWithoutDispute(EscrowInputClaimWithoutDispute {
         amount: Amount::from_sats(5_000),
         escrow_id: "coop-claim".to_string(),
         secret_code: secret.to_string(),
@@ -855,7 +855,7 @@ async fn test_double_spend_rejected() {
     let msg = [99u8; 32];
     let sig = sign(&seller_kp, &msg);
 
-    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+    let input = EscrowInput::ClaimWithoutDispute(EscrowInputClaimWithoutDispute {
         amount: Amount::from_sats(5_000),
         escrow_id: "double-spend".to_string(),
         secret_code: secret.to_string(),
@@ -872,7 +872,7 @@ async fn test_double_spend_rejected() {
     assert!(result1.is_ok(), "First claim should succeed: {:?}", result1.err());
 
     // Second claim: must be rejected — escrow is no longer Open
-    let input2 = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+    let input2 = EscrowInput::ClaimWithoutDispute(EscrowInputClaimWithoutDispute {
         amount: Amount::from_sats(5_000),
         escrow_id: "double-spend".to_string(),
         secret_code: secret.to_string(),
@@ -917,7 +917,7 @@ async fn test_forged_signature_rejected() {
         &seller_kp,
     );
 
-    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+    let input = EscrowInput::ClaimWithoutDispute(EscrowInputClaimWithoutDispute {
         amount: Amount::from_sats(5_000),
         escrow_id: "forged-sig".to_string(),
         secret_code: "secret123".to_string(),
@@ -957,7 +957,7 @@ async fn test_wrong_secret_code_rejected() {
     let msg = [55u8; 32];
     let sig = sign(&seller_kp, &msg);
 
-    let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+    let input = EscrowInput::ClaimWithoutDispute(EscrowInputClaimWithoutDispute {
         amount: Amount::from_sats(5_000),
         escrow_id: "wrong-secret".to_string(),
         secret_code: "WRONG_CODE".to_string(), // correct is "secret123"

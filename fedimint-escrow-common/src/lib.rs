@@ -92,7 +92,7 @@ pub enum Disputer {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub enum EscrowInput {
     /// The input when seller is claiming the escrow without any dispute
-    ClamingWithoutDispute(EscrowInputClamingWithoutDispute),
+    ClaimWithoutDispute(EscrowInputClaimWithoutDispute),
     /// The input when buyer or seller is disputing the escrow
     Disputing(EscrowInputDisputing),
     /// The input when 2-of-3 oracle signatures resolve the dispute
@@ -109,7 +109,7 @@ pub enum EscrowInput {
 /// The input for the escrow module when the seller is claiming the escrow using
 /// the secret code
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
-pub struct EscrowInputClamingWithoutDispute {
+pub struct EscrowInputClaimWithoutDispute {
     pub amount: Amount,
     pub escrow_id: String,
     pub secret_code: String,
@@ -325,9 +325,9 @@ impl fmt::Display for EscrowClientConfig {
 impl fmt::Display for EscrowInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EscrowInput::ClamingWithoutDispute(input) => write!(
+            EscrowInput::ClaimWithoutDispute(input) => write!(
                 f,
-                "EscrowInput::ClamingWithoutDispute {{ amount: {}, escrow_id: {} }}",
+                "EscrowInput::ClaimWithoutDispute {{ amount: {}, escrow_id: {} }}",
                 input.amount, input.escrow_id
             ),
             EscrowInput::Disputing(input) => write!(

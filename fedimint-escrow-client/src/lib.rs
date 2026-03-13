@@ -29,7 +29,7 @@ use fedimint_escrow_common::endpoints::EscrowInfo;
 use fedimint_escrow_common::oracle::SignedAttestation;
 use fedimint_escrow_common::{
     EscrowCommonInit, EscrowError, EscrowInput, EscrowInputClaimDelegated,
-    EscrowInputClamingWithoutDispute, EscrowInputDisputeDelegated, EscrowInputDisputing,
+    EscrowInputClaimWithoutDispute, EscrowInputDisputeDelegated, EscrowInputDisputing,
     EscrowInputOracleAttestation, EscrowInputTimeoutClaim, EscrowInputTimeoutClaimDelegated,
     EscrowModuleTypes, EscrowOutput, EscrowStates, KIND,
 };
@@ -200,7 +200,7 @@ impl EscrowClientModule {
         let signature = secp.sign_schnorr(&message, &self.key);
 
         let operation_id = OperationId(thread_rng().gen());
-        let input = EscrowInput::ClamingWithoutDispute(EscrowInputClamingWithoutDispute {
+        let input = EscrowInput::ClaimWithoutDispute(EscrowInputClaimWithoutDispute {
             amount,
             escrow_id,
             secret_code,
