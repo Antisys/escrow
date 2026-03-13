@@ -64,11 +64,9 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .into();
 
-    // Load mnemonic from existing client database
     let entropy = Client::load_decodable_client_secret::<Vec<u8>>(&db).await?;
     let mnemonic = Mnemonic::from_entropy(&entropy)?;
 
-    // Build client with all required modules
     let connectors = ConnectorRegistry::build_from_client_defaults()
         .bind()
         .await?;
@@ -90,7 +88,6 @@ async fn main() -> anyhow::Result<()> {
         .await
         .map(Arc::new)?;
 
-    // Verify escrow module is accessible
     let escrow_inst = client.get_first_module::<EscrowClientModule>()?;
     let pubkey = escrow_inst.module.key.public_key();
     info!("Escrow module loaded, service pubkey: {pubkey}");
@@ -419,12 +416,7 @@ async fn handle_resolve_oracle_and_pay(
     Json(req): Json<ResolveOracleAndPayReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let escrow = state.client.get_first_module::<EscrowClientModule>()?;
-    // Step 1: resolve escrow via oracle attestations (e-cash lands in wallet)
-    escrow.module.resolve_via_oracle(
-        req.escrow_id.clone(),
-        req.attestations,
-    ).await?;
-    // Step 2: immediately pay out via Lightning
+    escrow.module.resolve_via_oracle(req.escrow_id.clone(), req.attestations).await?;
     let result = escrow.module.pay_via_ln_module(req.bolt11).await?;
     Ok(Json(json!({
         "escrow_id": req.escrow_id,
@@ -450,11 +442,8 @@ async fn handle_await_invoice(
 
     let timeout_secs = req.timeout_secs.unwrap_or(2);
 
-    // Access LN module
     let ln_inst = state.client.get_first_module::<LightningClientModule>()?;
     let ln = ln_inst.module;
-
-    // Subscribe and wait briefly
     let mut updates = ln.subscribe_ln_receive(op_id).await?.into_stream();
     let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(timeout_secs);
 

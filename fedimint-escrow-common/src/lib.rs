@@ -8,7 +8,6 @@ use fedimint_core::core::{Decoder, ModuleInstanceId, ModuleKind};
 use fedimint_core::encoding::{Decodable, Encodable};
 use fedimint_core::module::{CommonModuleInit, ModuleCommon, ModuleConsensusVersion};
 use fedimint_core::{plugin_types_trait_impl_common, Amount};
-use hex;
 use oracle::SignedAttestation;
 use secp256k1::schnorr::Signature;
 use secp256k1::PublicKey;
@@ -16,21 +15,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-// Common contains types shared by both the client and server
 pub mod config;
 
-/// Unique name for this module
 pub const KIND: ModuleKind = ModuleKind::from_static_str("escrow");
 
-/// Modules are non-compatible with older versions
 pub const MODULE_CONSENSUS_VERSION: ModuleConsensusVersion = ModuleConsensusVersion::new(2, 0);
 
-/// Non-transaction items that will be submitted to consensus.
+/// Non-transaction items submitted to consensus.
 /// Guardians propagate pending oracle attestations so all peers
 /// can accumulate 2-of-3 before a client submits the input.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize, Encodable, Decodable)]
 pub enum EscrowConsensusItem {
-    /// A single oracle attestation observed by this guardian
     OracleAttestation {
         escrow_id: String,
         attestation: SignedAttestation,
@@ -53,26 +48,18 @@ impl std::fmt::Display for EscrowConsensusItem {
     }
 }
 
-/// The states for the escrow module
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Decodable, Encodable, Serialize, Deserialize)]
 pub enum EscrowStates {
-    /// the escrow is created and not claimed by buyer or seller, thus its open
     Open,
-    /// the escrow is resolved without dispute
     ResolvedWithoutDispute,
-    /// the escrow is resolved with dispute
     ResolvedWithDispute,
-    /// the escrow is disputed by buyer
     DisputedByBuyer,
-    /// the escrow is disputed by seller
     DisputedBySeller,
-    /// the escrow was claimed via timeout (timelock expired)
     TimedOut,
-    /// the escrow was resolved by oracle attestation (2-of-3)
     ResolvedByOracle,
 }
 
-/// Determines who receives funds when the timeout elapses
+/// Determines who receives funds when the timeout elapses.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable, Serialize, Deserialize)]
 pub enum TimeoutAction {
     /// Funds go to the seller (default: seller delivered, buyer unresponsive)
@@ -81,33 +68,26 @@ pub enum TimeoutAction {
     Refund,
 }
 
-/// The disputer in the escrow, can either be buyer or the seller
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub enum Disputer {
     Buyer,
     Seller,
 }
 
-/// The input for the escrow module
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub enum EscrowInput {
-    /// The input when seller is claiming the escrow without any dispute
     ClaimWithoutDispute(EscrowInputClaimWithoutDispute),
-    /// The input when buyer or seller is disputing the escrow
     Disputing(EscrowInputDisputing),
-    /// The input when 2-of-3 oracle signatures resolve the dispute
     OracleAttestation(EscrowInputOracleAttestation),
-    /// The input when the authorized party claims after the timelock has expired
     TimeoutClaim(EscrowInputTimeoutClaim),
-    /// Delegated claim: service submits, user's external signature authorizes (non-custodial)
+    /// Delegated: service submits, user's external signature authorizes (non-custodial)
     ClaimDelegated(EscrowInputClaimDelegated),
-    /// Delegated timeout claim: service submits with user's pre-signed authorization
+    /// Delegated: service submits with user's pre-signed authorization
     TimeoutClaimDelegated(EscrowInputTimeoutClaimDelegated),
-    /// Delegated dispute: service submits, user's signature proves identity
+    /// Delegated: service submits, user's signature proves identity
     DisputeDelegated(EscrowInputDisputeDelegated),
 }
-/// The input for the escrow module when the seller is claiming the escrow using
-/// the secret code
+
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EscrowInputClaimWithoutDispute {
     pub amount: Amount,
@@ -117,8 +97,6 @@ pub struct EscrowInputClaimWithoutDispute {
     pub signature: Signature,
 }
 
-/// The input for the escrow module when the buyer or seller is disputing the
-/// escrow
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EscrowInputDisputing {
     pub escrow_id: String,
@@ -127,7 +105,6 @@ pub struct EscrowInputDisputing {
     pub signature: Signature,
 }
 
-/// The input for claiming the escrow after the timelock has expired
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EscrowInputTimeoutClaim {
     pub amount: Amount,
@@ -136,7 +113,7 @@ pub struct EscrowInputTimeoutClaim {
     pub signature: Signature,
 }
 
-/// The input for 2-of-3 oracle-attestation dispute resolution.
+/// 2-of-3 oracle-attestation dispute resolution.
 /// The submitter_pubkey (service) gets the e-cash via InputMeta for LN payout.
 /// Authorization comes from the oracle attestations, not the transaction signer.
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
@@ -145,7 +122,7 @@ pub struct EscrowInputOracleAttestation {
     pub escrow_id: String,
     /// At least 2 valid, agreeing attestations from registered oracle pubkeys
     pub attestations: Vec<SignedAttestation>,
-    /// The service's pubkey — receives e-cash for LN payout to winner
+    /// Service's pubkey — receives e-cash for LN payout to winner
     pub submitter_pubkey: PublicKey,
 }
 
@@ -157,9 +134,7 @@ pub struct EscrowInputClaimDelegated {
     pub escrow_id: String,
     pub secret_code: String,
     pub hashed_message: [u8; 32],
-    /// Schnorr signature from buyer's ephemeral key over hashed_message
     pub external_signature: Signature,
-    /// Service's pubkey — receives e-cash via InputMeta (framework auth)
     pub submitter_pubkey: PublicKey,
 }
 
@@ -170,9 +145,7 @@ pub struct EscrowInputTimeoutClaimDelegated {
     pub amount: Amount,
     pub escrow_id: String,
     pub hashed_message: [u8; 32],
-    /// Schnorr signature from the authorized party's ephemeral key
     pub external_signature: Signature,
-    /// Service's pubkey — receives e-cash via InputMeta (framework auth)
     pub submitter_pubkey: PublicKey,
 }
 
@@ -180,33 +153,26 @@ pub struct EscrowInputTimeoutClaimDelegated {
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EscrowInputDisputeDelegated {
     pub escrow_id: String,
-    /// The actual disputer's pubkey (must match buyer or seller in escrow)
     pub disputer: PublicKey,
     pub hashed_message: [u8; 32],
-    /// Schnorr signature from the disputer's ephemeral key
     pub external_signature: Signature,
-    /// Service's pubkey — for framework auth (zero-amount state change)
     pub submitter_pubkey: PublicKey,
 }
 
-/// The output for the escrow module
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Encodable, Decodable)]
 pub struct EscrowOutput {
     pub amount: Amount,
     pub buyer_pubkey: PublicKey,
     pub seller_pubkey: PublicKey,
-    /// The 3 oracle (Nostr arbitrator) pubkeys; 2-of-3 needed for dispute resolution.
-    /// Must contain exactly 3 elements (enforced in process_output).
+    /// 3 oracle pubkeys; 2-of-3 needed for dispute resolution (enforced in process_output).
     pub oracle_pubkeys: Vec<PublicKey>,
     pub escrow_id: String,
     pub secret_code_hash: String,
     /// Bitcoin block height after which the timeout escape path is available
     pub timeout_block: u32,
-    /// Who receives funds when the timeout elapses
     pub timeout_action: TimeoutAction,
 }
 
-/// Errors that might be returned by the server when processing escrow inputs
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
 pub enum EscrowInputError {
     #[error("Invalid secret code")]
@@ -229,7 +195,6 @@ pub enum EscrowInputError {
     EscrowNotFound,
     #[error("Invalid public key")]
     InvalidPublicKey(String),
-    // Oracle-specific errors
     #[error("Oracle threshold not met (need 2 agreeing signatures from registered oracles)")]
     OracleThresholdNotMet,
     #[error("Unknown oracle public key — not in registered oracle set")]
@@ -242,7 +207,6 @@ pub enum EscrowInputError {
     InvalidOracleSignature,
 }
 
-/// Errors that might be returned by the server
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable)]
 pub enum EscrowOutputError {
     #[error("Escrow already exists")]
@@ -251,7 +215,6 @@ pub enum EscrowOutputError {
     InvalidOraclePubkeyCount,
 }
 
-/// The errors for the escrow module in client side
 #[derive(
     Debug, Clone, Eq, PartialEq, Hash, Error, Encodable, Decodable, Serialize, Deserialize,
 )]
@@ -270,7 +233,7 @@ impl From<secp256k1::Error> for EscrowInputError {
     }
 }
 
-/// Contains the types defined above
+/// Marker type for the plugin_types_trait_impl_common macro.
 #[derive(Debug, Clone)]
 pub struct EscrowModuleTypes;
 
@@ -283,8 +246,6 @@ impl std::fmt::Display for EscrowOutputOutcome {
     }
 }
 
-// Wire together the types for this module
-// Note: KIND is now required as the first argument (changed in v0.4+)
 plugin_types_trait_impl_common!(
     KIND,
     EscrowModuleTypes,
@@ -297,7 +258,6 @@ plugin_types_trait_impl_common!(
     EscrowOutputError
 );
 
-/// The common initializer for the escrow module
 #[derive(Debug)]
 pub struct EscrowCommonInit;
 
@@ -382,7 +342,6 @@ impl fmt::Display for EscrowOutput {
     }
 }
 
-/// Hashes the value using SHA256
 pub fn hash256(value: String) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());

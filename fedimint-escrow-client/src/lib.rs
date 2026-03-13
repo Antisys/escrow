@@ -41,7 +41,6 @@ use sha2::{Digest, Sha256};
 use crate::api::EscrowFederationApi;
 use crate::states::{EscrowClientContext, EscrowStateMachine};
 
-/// The escrow client module
 #[derive(Debug)]
 pub struct EscrowClientModule {
     cfg: EscrowClientConfig,
@@ -51,14 +50,10 @@ pub struct EscrowClientModule {
     db: Database,
 }
 
-/// The high level state for tracking operations of transactions
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum EscrowOperationState {
-    /// The transaction is being processed by the federation
     Created,
-    /// The transaction is accepted by the federation
     Accepted,
-    /// The transaction is rejected by the federation
     Rejected,
 }
 
@@ -76,7 +71,6 @@ impl ClientModule for EscrowClientModule {
         }
     }
 
-    /// Returns the fee the processing of this input requires (not the amount).
     fn input_fee(
         &self,
         _amount: &Amounts,
@@ -85,7 +79,6 @@ impl ClientModule for EscrowClientModule {
         Some(Amounts::ZERO)
     }
 
-    /// Returns the fee the processing of this output requires.
     fn output_fee(
         &self,
         _amount: &Amounts,
@@ -133,16 +126,13 @@ impl EscrowClientModule {
             timeout_action,
         };
 
-        let operation_id_clone = operation_id;
         let client_output = ClientOutput {
             output,
             amounts: Amounts::new_bitcoin(amount),
         };
         let output_sm = ClientOutputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -181,7 +171,6 @@ impl EscrowClientModule {
     ) -> anyhow::Result<()> {
         let escrow_value: EscrowInfo = self.module_api.get_escrow_info(escrow_id.clone()).await?;
 
-        // Only Open escrows can be claimed cooperatively
         if escrow_value.state == EscrowStates::DisputedByBuyer
             || escrow_value.state == EscrowStates::DisputedBySeller
         {
@@ -208,7 +197,6 @@ impl EscrowClientModule {
             signature,
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -216,9 +204,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -249,7 +235,6 @@ impl EscrowClientModule {
         Ok(())
     }
 
-    /// Initiates a dispute (buyer or seller can call this).
     pub async fn initiate_dispute(&self, escrow_id: String) -> anyhow::Result<()> {
         let operation_id = OperationId(thread_rng().gen());
 
@@ -267,7 +252,6 @@ impl EscrowClientModule {
             signature,
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -275,9 +259,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -309,8 +291,7 @@ impl EscrowClientModule {
     }
 
     /// Resolves a disputed escrow via 2-of-3 oracle attestations.
-    /// The winning party (buyer or seller) receives the escrow amount as ecash.
-    /// Attestations must include at least 2 agreeing signatures from the registered oracle set.
+    /// The winning party receives the escrow amount as ecash.
     pub async fn resolve_via_oracle(
         &self,
         escrow_id: String,
@@ -318,7 +299,6 @@ impl EscrowClientModule {
     ) -> anyhow::Result<()> {
         let escrow_value: EscrowInfo = self.module_api.get_escrow_info(escrow_id.clone()).await?;
 
-        // Only disputed escrows can be resolved via oracle
         if escrow_value.state != EscrowStates::DisputedByBuyer
             && escrow_value.state != EscrowStates::DisputedBySeller
         {
@@ -333,7 +313,6 @@ impl EscrowClientModule {
             submitter_pubkey: self.key.public_key(),
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -341,9 +320,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -375,13 +352,10 @@ impl EscrowClientModule {
     }
 
     /// Claims an escrow after the timelock has expired.
-    /// The caller must be the party authorized by `timeout_action`:
-    /// - `TimeoutAction::Refund` → buyer reclaims
-    /// - `TimeoutAction::Release` → seller claims
+    /// Caller must be authorized by `timeout_action`: Refund → buyer, Release → seller.
     pub async fn claim_timeout(&self, escrow_id: String) -> anyhow::Result<()> {
         let escrow_value: EscrowInfo = self.module_api.get_escrow_info(escrow_id.clone()).await?;
 
-        // Only Open escrows can be claimed via timeout (disputed escrows use oracle path)
         if escrow_value.state != EscrowStates::Open {
             return Err(anyhow::anyhow!(EscrowError::EscrowNotFound));
         }
@@ -401,7 +375,6 @@ impl EscrowClientModule {
             signature,
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -409,9 +382,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -473,7 +444,6 @@ impl EscrowClientModule {
             submitter_pubkey: self.key.public_key(),
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -481,9 +451,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -535,7 +503,6 @@ impl EscrowClientModule {
             submitter_pubkey: self.key.public_key(),
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -543,9 +510,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -596,7 +561,6 @@ impl EscrowClientModule {
             submitter_pubkey: self.key.public_key(),
         });
 
-        let operation_id_clone = operation_id;
         let client_input = ClientInput {
             input,
             keys: vec![self.key],
@@ -604,9 +568,7 @@ impl EscrowClientModule {
         };
         let input_sm = ClientInputSM {
             state_machines: Arc::new(move |_: OutPointRange| {
-                vec![EscrowStateMachine {
-                    operation_id: operation_id_clone,
-                }]
+                vec![EscrowStateMachine { operation_id }]
             }),
         };
 
@@ -668,7 +630,6 @@ impl EscrowClientModule {
         }))
     }
 
-    /// Subscribes to transaction updates for operations with no ecash output (e.g. dispute).
     pub async fn subscribe_transactions_input(
         &self,
         operation_id: OperationId,
@@ -692,53 +653,40 @@ impl EscrowClientModule {
         })))
     }
 
-    /// Claims an escrow cooperatively (secret_code) and immediately pays via Lightning.
-    ///
-    /// This is a single CLI-level operation: claim → brief e-cash in wallet → LN pay.
-    /// The Python service never sees the intermediate e-cash state.
+    /// Claims escrow cooperatively (secret_code) and immediately pays via Lightning.
+    /// Claim → brief e-cash in wallet → LN pay. The Python service never sees intermediate e-cash.
     pub async fn claim_and_pay(
         &self,
         escrow_id: String,
         secret_code: String,
         bolt11_str: String,
     ) -> anyhow::Result<serde_json::Value> {
-        // Step 1: claim the escrow cooperatively
         self.claim_escrow(escrow_id.clone(), secret_code).await?;
-
-        // Step 2: parse invoice and pay via LN module
         let result = self.pay_via_ln_module(bolt11_str).await?;
-
         Ok(serde_json::json!({
             "escrow_id": escrow_id,
             "payment": result,
         }))
     }
 
-    /// Claims an escrow after timeout and immediately pays via Lightning.
-    ///
-    /// This is a single CLI-level operation: claim-timeout → brief e-cash → LN pay.
+    /// Claims escrow after timeout and immediately pays via Lightning.
     pub async fn claim_timeout_and_pay(
         &self,
         escrow_id: String,
         bolt11_str: String,
     ) -> anyhow::Result<serde_json::Value> {
-        // Step 1: claim via timeout
         self.claim_timeout(escrow_id.clone()).await?;
-
-        // Step 2: pay via LN module
         let result = self.pay_via_ln_module(bolt11_str).await?;
-
         Ok(serde_json::json!({
             "escrow_id": escrow_id,
             "payment": result,
         }))
     }
 
-    /// Internal helper: find LN module instance, select gateway, and pay invoice.
+    /// Find LN module instance, select gateway, and pay invoice.
     pub async fn pay_via_ln_module(&self, bolt11_str: String) -> anyhow::Result<serde_json::Value> {
         use lightning_invoice::Bolt11Invoice;
 
-        // Find LN module instance ID from config
         let config = self.client_ctx.get_config().await;
         let ln_kind = LightningClientModule::kind();
         let ln_instance_id = config
@@ -748,7 +696,6 @@ impl EscrowClientModule {
             .map(|(id, _)| *id)
             .ok_or_else(|| anyhow::anyhow!("No Lightning module found in federation config"))?;
 
-        // Downcast to typed LightningClientModule
         let iface = self.client_ctx.iface();
         let dyn_module = iface.get_module(ln_instance_id);
         let ln: &LightningClientModule = dyn_module
@@ -756,21 +703,13 @@ impl EscrowClientModule {
             .downcast_ref::<LightningClientModule>()
             .ok_or_else(|| anyhow::anyhow!("Failed to access Lightning module"))?;
 
-        // Parse invoice
         let invoice: Bolt11Invoice = bolt11_str
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid BOLT11 invoice: {e}"))?;
 
-        // Network check removed: GlobalClientConfig no longer has `network` field in upstream.
-
-        // Select best available gateway
         let gateway = ln.select_available_gateway(None, Some(invoice.clone())).await?;
-
-        // Pay the invoice
         let payment = ln.pay_bolt11_invoice(Some(gateway), invoice, ()).await?;
         let operation_id = payment.payment_type.operation_id();
-
-        // Await completion
         let outcome = ln.await_outgoing_payment(operation_id).await?;
 
         match outcome {
@@ -791,8 +730,6 @@ impl EscrowClientModule {
     /// to atomically lock funds into a Fedimint escrow.
     ///
     /// Returns `{bolt11, escrow_id, operation_id}`.
-    /// Window ①: buyer pays bolt11 → service wallet briefly holds e-cash → escrow locked.
-    /// `await_receive_into_escrow()` collapses this into a single atomic CLI call.
     pub async fn receive_into_escrow(
         &self,
         amount: Amount,
@@ -811,13 +748,11 @@ impl EscrowClientModule {
             return Err(anyhow::anyhow!("oracle_pubkeys must contain exactly 3 public keys"));
         }
 
-        // Generate escrow ID — same mechanism as `create_escrow`
         let escrow_id = generate(
             32,
             "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
         );
 
-        // Access LN module
         let config = self.client_ctx.get_config().await;
         let ln_kind = LightningClientModule::kind();
         let ln_instance_id = config
@@ -833,13 +768,8 @@ impl EscrowClientModule {
             .downcast_ref::<LightningClientModule>()
             .ok_or_else(|| anyhow::anyhow!("Failed to access Lightning module"))?;
 
-        // Select a gateway so the invoice includes real LN route hints.
-        // Uses get_gateway() which checks cache first, then refreshes if not found.
-        // When gateway_id is Some, selects that specific gateway.
-        // When None, picks a random available gateway (not internal).
         let gateway = ln.get_gateway(gateway_id, false).await?;
 
-        // Create LN receive invoice
         let description_str = invoice_description.unwrap_or_else(|| format!("Escrow: {}", escrow_id));
         let description = lightning_invoice::Description::new(description_str)
             .map_err(|e| anyhow::anyhow!("Invalid invoice description: {:?}", e))?;
@@ -861,10 +791,9 @@ impl EscrowClientModule {
     }
 
     /// Poll the LN receive operation. When the buyer's payment is confirmed (`Claimed`),
-    /// atomically create the Fedimint escrow — Window ① is eliminated at the Rust level.
+    /// atomically create the Fedimint escrow.
     ///
     /// Idempotent: if the escrow already exists, returns `{status: "funded"}` immediately.
-    /// Returns `{status: "awaiting"|"funded"|"failed", escrow_id, reason?}`.
     pub async fn await_receive_into_escrow(
         &self,
         ln_op_id_str: String,
@@ -878,7 +807,6 @@ impl EscrowClientModule {
         timeout_secs: u64,
         buyer_pubkey: Option<fedimint_core::secp256k1::PublicKey>,
     ) -> anyhow::Result<serde_json::Value> {
-        // Idempotency: if escrow already created, return immediately
         if self.module_api.get_escrow_info(escrow_id.clone()).await.is_ok() {
             return Ok(serde_json::json!({
                 "status": "funded",
@@ -886,12 +814,10 @@ impl EscrowClientModule {
             }));
         }
 
-        // Parse LN operation ID from hex string
         let ln_op_id: OperationId = ln_op_id_str
             .parse()
             .map_err(|e| anyhow::anyhow!("Invalid operation_id: {e}"))?;
 
-        // Access LN module
         let config = self.client_ctx.get_config().await;
         let ln_kind = LightningClientModule::kind();
         let ln_instance_id = config
@@ -907,7 +833,6 @@ impl EscrowClientModule {
             .downcast_ref::<LightningClientModule>()
             .ok_or_else(|| anyhow::anyhow!("Failed to access Lightning module"))?;
 
-        // Subscribe to LN receive state updates (replays all historical states)
         let mut updates = ln.subscribe_ln_receive(ln_op_id).await?.into_stream();
 
         let deadline =
@@ -932,18 +857,15 @@ impl EscrowClientModule {
                         cancel_reason = Some(format!("{:?}", reason));
                         break;
                     }
-                    _ => {
-                        // WaitingForPayment, Funded, AwaitingFunds — keep polling
-                    }
+                    _ => {}
                 },
-                Ok(None) => break,      // stream ended
-                Err(_timeout) => break, // poll timeout reached
+                Ok(None) => break,
+                Err(_timeout) => break,
             }
         }
 
-        // If LN payment confirmed, create the escrow NOW
-        // The e-cash is briefly in the wallet during create_escrow() — this is the
-        // minimized Window ①: milliseconds inside one CLI call, invisible to Python.
+        // LN payment confirmed — create escrow atomically.
+        // E-cash is briefly in wallet during create_escrow(), invisible to the service.
         if status == "funded" {
             self.create_escrow(
                 amount,
@@ -968,7 +890,6 @@ impl EscrowClientModule {
         Ok(result)
     }
 
-    /// Subscribes to transaction updates for operations that generate ecash change outputs.
     pub async fn subscribe_transactions_output(
         &self,
         operation_id: OperationId,
@@ -1001,7 +922,6 @@ impl EscrowClientModule {
     }
 }
 
-/// The escrow client module initializer
 #[derive(Debug, Clone)]
 pub struct EscrowClientInit;
 
@@ -1017,7 +937,6 @@ impl ModuleInit for EscrowClientInit {
     }
 }
 
-/// Generates the client module
 #[apply(async_trait_maybe_send!)]
 impl ClientModuleInit for EscrowClientInit {
     type Module = EscrowClientModule;

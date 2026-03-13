@@ -48,15 +48,12 @@ use futures::StreamExt;
 use secp256k1::{Message, Secp256k1};
 use strum::IntoEnumIterator;
 
-/// Generates the module
 #[derive(Debug, Clone)]
 pub struct EscrowInit;
 
-// Note: ModuleInit does NOT use #[async_trait] in v0.4+ (uses AFIT instead)
 impl ModuleInit for EscrowInit {
     type Common = EscrowCommonInit;
 
-    /// Dumps all database items for debugging
     async fn dump_database(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -79,9 +76,7 @@ impl ModuleInit for EscrowInit {
                         "Escrow"
                     );
                 }
-                DbKeyPrefix::BlockHeight => {
-                    // Singleton key — nothing to enumerate
-                }
+                DbKeyPrefix::BlockHeight => {}
                 DbKeyPrefix::PendingOracleAttestation => {
                     push_db_pair_items!(
                         dbtx,
@@ -98,12 +93,10 @@ impl ModuleInit for EscrowInit {
     }
 }
 
-/// Implementation of server module non-consensus functions
 #[async_trait]
 impl ServerModuleInit for EscrowInit {
     type Module = Escrow;
 
-    /// Returns the version of this module
     fn versions(&self, _core: CoreConsensusVersion) -> &[ModuleConsensusVersion] {
         &[MODULE_CONSENSUS_VERSION]
     }
@@ -119,12 +112,10 @@ impl ServerModuleInit for EscrowInit {
         )
     }
 
-    /// Initialize the module
     async fn init(&self, args: &ServerModuleInitArgs<Self>) -> anyhow::Result<Self::Module> {
         Ok(Escrow::new(args.cfg().to_typed()?, args.server_bitcoin_rpc_monitor()))
     }
 
-    /// Generates configs for all peers in a trusted manner for testing
     fn trusted_dealer_gen(
         &self,
         peers: &[PeerId],
@@ -144,7 +135,6 @@ impl ServerModuleInit for EscrowInit {
             .collect()
     }
 
-    /// Generates configs for all peers in an untrusted manner
     async fn distributed_gen(
         &self,
         _peers: &(dyn PeerHandleOps + Send + Sync),
@@ -159,7 +149,6 @@ impl ServerModuleInit for EscrowInit {
         .to_erased())
     }
 
-    /// Converts the consensus config into the client config
     fn get_client_config(
         &self,
         config: &ServerModuleConsensusConfig,
@@ -185,22 +174,18 @@ impl ServerModuleInit for EscrowInit {
     }
 }
 
-/// The escrow module
 #[derive(Debug)]
 pub struct Escrow {
     pub cfg: EscrowConfig,
-    /// Bitcoin RPC monitor for block height tracking. None in unit tests.
+    /// None in unit tests (block height proposals disabled).
     bitcoin_rpc: Option<ServerBitcoinRpcMonitor>,
 }
 
-/// Implementation of consensus for the server module
 #[async_trait]
 impl ServerModule for Escrow {
-    /// Define the consensus types
     type Common = EscrowModuleTypes;
     type Init = EscrowInit;
 
-    /// Propose pending oracle attestations and current block height.
     async fn consensus_proposal(
         &self,
         dbtx: &mut DatabaseTransaction<'_>,
@@ -215,8 +200,6 @@ impl ServerModule for Escrow {
             .collect::<Vec<_>>()
             .await;
 
-        // Propose current block height so the module can enforce timelocks.
-        // status() reads from a cached watch channel — cheap, non-blocking.
         if let Some(rpc) = &self.bitcoin_rpc {
             if let Some(status) = rpc.status() {
                 items.push(EscrowConsensusItem::BlockHeight(status.block_count));
@@ -226,7 +209,6 @@ impl ServerModule for Escrow {
         items
     }
 
-    /// Validate and store a confirmed oracle attestation from any peer
     async fn process_consensus_item<'a, 'b>(
         &'a self,
         dbtx: &mut DatabaseTransaction<'b>,
@@ -235,7 +217,6 @@ impl ServerModule for Escrow {
     ) -> anyhow::Result<()> {
         match consensus_item {
             EscrowConsensusItem::BlockHeight(new_height) => {
-                // Only advance block height, never go backwards.
                 let current = dbtx.get_value(&BlockHeightKey).await.unwrap_or(0);
                 if new_height > current {
                     dbtx.insert_entry(&BlockHeightKey, &new_height).await;
@@ -243,7 +224,6 @@ impl ServerModule for Escrow {
                 Ok(())
             }
             EscrowConsensusItem::OracleAttestation { escrow_id, attestation } => {
-                // Escrow must exist
                 let Some(escrow_value) = dbtx
                     .get_value(&EscrowKey { escrow_id: escrow_id.clone() })
                     .await
@@ -251,15 +231,13 @@ impl ServerModule for Escrow {
                     bail!("Escrow not found: {escrow_id}");
                 };
 
-                // Validate the individual attestation
                 oracle::verify_attestation(
                     &attestation,
-                    &escrow_value.oracle_pubkeys,  // Vec<PublicKey> coerces to &[PublicKey]
+                    &escrow_value.oracle_pubkeys,
                     &escrow_id,
                 )
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-                // Store (or overwrite) in pending attestation DB keyed by escrow + oracle pubkey
                 let pending_key = PendingOracleAttestationKey {
                     escrow_id,
                     pubkey: attestation.pubkey,
@@ -282,12 +260,10 @@ impl ServerModule for Escrow {
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;
 
-                // Only allow claiming from Open state (prevents double-spend)
                 if escrow_value.state != EscrowStates::Open {
                     return Err(EscrowInputError::InvalidStateForClaimingEscrow);
                 }
 
-                // check the signature of seller
                 let secp = Secp256k1::new();
                 let message = Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
                 let (xonly_pubkey, _parity) = escrow_value.seller_pubkey.x_only_public_key();
@@ -299,7 +275,6 @@ impl ServerModule for Escrow {
                     return Err(EscrowInputError::InvalidSeller);
                 }
 
-                // the secret code when hashed should be the same as the one in the db
                 if escrow_value.secret_code_hash != hash256(escrow_input.secret_code.clone()) {
                     return Err(EscrowInputError::InvalidSecretCode);
                 }
@@ -323,7 +298,6 @@ impl ServerModule for Escrow {
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;
 
-                // Determine who is disputing
                 let disputer = if escrow_input.disputer == escrow_value.buyer_pubkey {
                     Disputer::Buyer
                 } else if escrow_input.disputer == escrow_value.seller_pubkey {
@@ -332,7 +306,6 @@ impl ServerModule for Escrow {
                     return Err(EscrowInputError::UnauthorizedToDispute);
                 };
 
-                // check the signature of disputer
                 let secp = Secp256k1::new();
                 let message = Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
                 let xonly_pubkey = match disputer {
@@ -381,16 +354,14 @@ impl ServerModule for Escrow {
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;
 
-                // Escrow must be in a disputed state for oracle resolution
                 match escrow_value.state {
                     EscrowStates::DisputedByBuyer | EscrowStates::DisputedBySeller => {}
                     _ => return Err(EscrowInputError::InvalidStateForClaimingEscrow),
                 }
 
-                // Verify 2-of-3 oracle threshold
                 let beneficiary = oracle::verify_threshold(
                     &escrow_input.attestations,
-                    &escrow_value.oracle_pubkeys,  // Vec<PublicKey> coerces to &[PublicKey]
+                    &escrow_value.oracle_pubkeys,
                     &escrow_input.escrow_id,
                 )
                 .map_err(|e| match e {
@@ -414,8 +385,8 @@ impl ServerModule for Escrow {
                 };
                 dbtx.insert_entry(&escrow_key, &escrow_value).await;
 
-                // Submitter (service) gets the e-cash for LN payout to winner.
-                // Authorization is provided by the oracle attestations, not the tx signer.
+                // Submitter (service) gets e-cash for LN payout to winner.
+                // Authorization is from oracle attestations, not the tx signer.
                 Ok(InputMeta {
                     amount: TransactionItemAmounts {
                         amounts: Amounts::new_bitcoin(escrow_input.amount),
@@ -429,7 +400,6 @@ impl ServerModule for Escrow {
                     .get_escrow_value(dbtx, escrow_input.escrow_id.clone())
                     .await?;
 
-                // Only open or disputed escrows can be claimed via timeout
                 match escrow_value.state {
                     EscrowStates::Open
                     | EscrowStates::DisputedByBuyer
@@ -437,7 +407,6 @@ impl ServerModule for Escrow {
                     _ => return Err(EscrowInputError::InvalidStateForClaimingEscrow),
                 }
 
-                // Check that the timelock has expired
                 let current_height = dbtx
                     .get_value(&BlockHeightKey)
                     .await
@@ -449,13 +418,11 @@ impl ServerModule for Escrow {
                     });
                 }
 
-                // Determine who is authorized to claim based on timeout_action
                 let (authorized_pubkey, auth_error) = match escrow_value.timeout_action {
                     TimeoutAction::Release => (escrow_value.seller_pubkey, EscrowInputError::InvalidSeller),
                     TimeoutAction::Refund => (escrow_value.buyer_pubkey, EscrowInputError::InvalidBuyer),
                 };
 
-                // Verify the claimant's signature
                 let secp = Secp256k1::new();
                 let message =
                     Message::from_digest_slice(&escrow_input.hashed_message).expect("32 bytes");
@@ -493,12 +460,10 @@ impl ServerModule for Escrow {
                     return Err(EscrowInputError::InvalidStateForClaimingEscrow);
                 }
 
-                // Verify secret code hash
                 if escrow_value.secret_code_hash != hash256(input.secret_code.clone()) {
                     return Err(EscrowInputError::InvalidSecretCode);
                 }
 
-                // Verify buyer's external Schnorr signature (buyer holds secret + key)
                 let secp = Secp256k1::new();
                 let message = Message::from_digest_slice(&input.hashed_message).expect("32 bytes");
                 let (xonly_pubkey, _parity) = escrow_value.buyer_pubkey.x_only_public_key();
@@ -529,7 +494,6 @@ impl ServerModule for Escrow {
                     .get_escrow_value(dbtx, input.escrow_id.clone())
                     .await?;
 
-                // Only open or disputed escrows can be claimed via timeout
                 match escrow_value.state {
                     EscrowStates::Open
                     | EscrowStates::DisputedByBuyer
@@ -537,7 +501,6 @@ impl ServerModule for Escrow {
                     _ => return Err(EscrowInputError::InvalidStateForClaimingEscrow),
                 }
 
-                // Check that the timelock has expired
                 let current_height = dbtx
                     .get_value(&BlockHeightKey)
                     .await
@@ -549,13 +512,11 @@ impl ServerModule for Escrow {
                     });
                 }
 
-                // Determine authorized party from timeout_action
                 let (authorized_pubkey, auth_error) = match escrow_value.timeout_action {
                     TimeoutAction::Release => (escrow_value.seller_pubkey, EscrowInputError::InvalidSeller),
                     TimeoutAction::Refund => (escrow_value.buyer_pubkey, EscrowInputError::InvalidBuyer),
                 };
 
-                // Verify external signature from authorized party
                 let secp = Secp256k1::new();
                 let message = Message::from_digest_slice(&input.hashed_message).expect("32 bytes");
                 let (xonly_pubkey, _parity) = authorized_pubkey.x_only_public_key();
@@ -586,7 +547,6 @@ impl ServerModule for Escrow {
                     .get_escrow_value(dbtx, input.escrow_id.clone())
                     .await?;
 
-                // Determine who is disputing
                 let disputer = if input.disputer == escrow_value.buyer_pubkey {
                     Disputer::Buyer
                 } else if input.disputer == escrow_value.seller_pubkey {
@@ -595,7 +555,6 @@ impl ServerModule for Escrow {
                     return Err(EscrowInputError::UnauthorizedToDispute);
                 };
 
-                // Verify external signature from disputer
                 let secp = Secp256k1::new();
                 let message = Message::from_digest_slice(&input.hashed_message).expect("32 bytes");
                 let (xonly_pubkey, _parity) = input.disputer.x_only_public_key();
@@ -648,7 +607,6 @@ impl ServerModule for Escrow {
         let escrow_key = EscrowKey {
             escrow_id: output.escrow_id.clone(),
         };
-        // Validate exactly 3 oracle pubkeys
         if output.oracle_pubkeys.len() != 3 {
             return Err(EscrowOutputError::InvalidOraclePubkeyCount);
         }
@@ -686,16 +644,13 @@ impl ServerModule for Escrow {
         audit: &mut Audit,
         module_instance_id: ModuleInstanceId,
     ) {
-        // Each locked escrow is a liability: the federation owes that ecash to the
-        // winning party. We report negative amounts (liabilities).
+        // Each locked escrow is a liability (federation owes ecash to winning party).
         audit
             .add_items(dbtx, module_instance_id, &EscrowKeyPrefix, |_k, v| {
-                // Only open/disputed escrows are still locked — resolved ones are gone
                 match v.state {
                     EscrowStates::Open
                     | EscrowStates::DisputedByBuyer
                     | EscrowStates::DisputedBySeller => -(v.amount.msats as i64),
-                    // Resolved/timed-out/oracle-resolved escrows have been paid out — no liability
                     EscrowStates::ResolvedWithoutDispute
                     | EscrowStates::ResolvedWithDispute
                     | EscrowStates::TimedOut
@@ -719,12 +674,10 @@ impl ServerModule for Escrow {
 }
 
 impl Escrow {
-    /// Create new module instance
     pub fn new(cfg: EscrowConfig, bitcoin_rpc: ServerBitcoinRpcMonitor) -> Escrow {
         Escrow { cfg, bitcoin_rpc: Some(bitcoin_rpc) }
     }
 
-    /// Constructor for unit tests — no Bitcoin RPC (block height proposals disabled).
     #[cfg(test)]
     pub fn new_for_testing(cfg: EscrowConfig) -> Escrow {
         Escrow { cfg, bitcoin_rpc: None }

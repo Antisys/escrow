@@ -21,7 +21,6 @@ use crate::{Escrow, EscrowValue};
 use fedimint_escrow_common::config::{EscrowConfig, EscrowConfigConsensus, EscrowConfigPrivate};
 use sha2::{Sha256, Digest};
 
-/// Compute SHA256 of a string as [u8; 32] (for hashed_message fields)
 fn sha256_bytes(input: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
@@ -31,7 +30,6 @@ fn sha256_bytes(input: &str) -> [u8; 32] {
     bytes
 }
 
-/// Build a test Escrow module instance
 fn test_escrow() -> Escrow {
     Escrow::new_for_testing(EscrowConfig {
         private: EscrowConfigPrivate,
@@ -41,12 +39,10 @@ fn test_escrow() -> Escrow {
     })
 }
 
-/// Build an in-memory Fedimint Database
 async fn test_db() -> Database {
     Database::new(MemDatabase::new(), Default::default())
 }
 
-/// Dummy InPoint (not meaningful for our logic)
 fn dummy_in_point() -> InPoint {
     InPoint {
         txid: TransactionId::all_zeros(),
@@ -54,7 +50,6 @@ fn dummy_in_point() -> InPoint {
     }
 }
 
-/// Dummy OutPoint
 fn dummy_out_point() -> OutPoint {
     OutPoint {
         txid: TransactionId::all_zeros(),
@@ -62,7 +57,6 @@ fn dummy_out_point() -> OutPoint {
     }
 }
 
-/// Build a standard EscrowOutput with 3 oracle keypairs
 fn make_output(
     amount: Amount,
     buyer_kp: &Keypair,
@@ -89,7 +83,6 @@ fn make_output(
     }
 }
 
-/// Sign a 32-byte message with a keypair (Schnorr)
 fn sign(kp: &Keypair, msg_bytes: &[u8; 32]) -> secp256k1::schnorr::Signature {
     let secp = Secp256k1::new();
     let message = Message::from_digest_slice(msg_bytes).expect("32 bytes");
@@ -548,7 +541,6 @@ async fn test_cooperative_claim_without_dispute() {
 
 // ─── Oracle attestation tests ─────────────────────────────────────────────────
 
-/// Generate a random service keypair (simulates the service submitting oracle resolution)
 fn random_service_kp() -> Keypair {
     let secp = Secp256k1::new();
     Keypair::new(&secp, &mut OsRng)
