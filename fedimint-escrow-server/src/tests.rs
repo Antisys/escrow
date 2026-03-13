@@ -548,6 +548,12 @@ async fn test_cooperative_claim_without_dispute() {
 
 // ─── Oracle attestation tests ─────────────────────────────────────────────────
 
+/// Generate a random service keypair (simulates the service submitting oracle resolution)
+fn random_service_kp() -> Keypair {
+    let secp = Secp256k1::new();
+    Keypair::new(&secp, &mut OsRng)
+}
+
 #[tokio::test]
 async fn test_oracle_two_sigs_buyer_wins() {
     let escrow = test_escrow();
@@ -566,11 +572,13 @@ async fn test_oracle_two_sigs_buyer_wins() {
     // Two oracle attestations: buyer wins
     let att1 = make_attestation(&oracle_kps[0], "oracle-buyer-wins", Beneficiary::Buyer);
     let att2 = make_attestation(&oracle_kps[1], "oracle-buyer-wins", Beneficiary::Buyer);
+    let service_kp = random_service_kp();
 
     let input = EscrowInput::OracleAttestation(EscrowInputOracleAttestation {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-buyer-wins".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: service_kp.public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -581,14 +589,14 @@ async fn test_oracle_two_sigs_buyer_wins() {
 
     assert!(result.is_ok(), "Two valid oracle sigs should pass: {:?}", result.err());
     let meta = result.unwrap();
-    assert_eq!(meta.pub_key, buyer_kp.public_key(), "Buyer should win");
+    assert_eq!(meta.pub_key, service_kp.public_key(), "E-cash goes to submitter (service)");
     assert_eq!(meta.amount.amounts, Amounts::new_bitcoin(Amount::from_sats(10_000)));
 }
 
 #[tokio::test]
 async fn test_oracle_two_sigs_seller_wins() {
     let escrow = test_escrow();
-    let (db, buyer_kp, seller_kp, oracle_kps) = setup_escrow_for_input(
+    let (db, buyer_kp, _seller_kp, oracle_kps) = setup_escrow_for_input(
         &escrow,
         "oracle-seller-wins",
         Amount::from_sats(10_000),
@@ -601,11 +609,13 @@ async fn test_oracle_two_sigs_seller_wins() {
 
     let att1 = make_attestation(&oracle_kps[0], "oracle-seller-wins", Beneficiary::Seller);
     let att2 = make_attestation(&oracle_kps[2], "oracle-seller-wins", Beneficiary::Seller);
+    let service_kp = random_service_kp();
 
     let input = EscrowInput::OracleAttestation(EscrowInputOracleAttestation {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-seller-wins".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: service_kp.public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -616,7 +626,7 @@ async fn test_oracle_two_sigs_seller_wins() {
 
     assert!(result.is_ok(), "Two valid oracle sigs for seller should pass: {:?}", result.err());
     let meta = result.unwrap();
-    assert_eq!(meta.pub_key, seller_kp.public_key(), "Seller should win");
+    assert_eq!(meta.pub_key, service_kp.public_key(), "E-cash goes to submitter (service)");
 }
 
 #[tokio::test]
@@ -640,6 +650,7 @@ async fn test_oracle_single_sig_threshold_fails() {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-single-sig".to_string(),
         attestations: vec![att1],
+        submitter_pubkey: random_service_kp().public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -680,6 +691,7 @@ async fn test_oracle_conflicting_outcomes_rejected() {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-conflict".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: random_service_kp().public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -723,6 +735,7 @@ async fn test_oracle_unknown_pubkey_rejected() {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-unknown-key".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: random_service_kp().public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -763,6 +776,7 @@ async fn test_oracle_wrong_escrow_id_rejected() {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-wrong-id".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: random_service_kp().public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -803,6 +817,7 @@ async fn test_oracle_duplicate_pubkey_counts_once() {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-dup-pubkey".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: random_service_kp().public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
@@ -986,6 +1001,7 @@ async fn test_oracle_non_disputed_state_rejected() {
         amount: Amount::from_sats(10_000),
         escrow_id: "oracle-not-disputed".to_string(),
         attestations: vec![att1, att2],
+        submitter_pubkey: random_service_kp().public_key(),
     });
 
     let mut dbtx = db.begin_transaction().await;
